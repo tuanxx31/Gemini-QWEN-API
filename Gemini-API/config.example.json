@@ -1,0 +1,9 @@
+{
+    "api_key": "sk-demo",
+    "cookie_1PSID": "YOUR_SECURE_1PSID_HERE",
+    "cookie_1PSIDTS": "YOUR_SECURE_1PSIDTS_HERE",
+    "host": "0.0.0.0",
+    "port": 8000,
+    "default_model": "gemini-2.5-flash",
+    "timeout": 120
+}
