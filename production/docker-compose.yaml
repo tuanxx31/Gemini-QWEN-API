@@ -1,0 +1,38 @@
+services:
+  qwen-api:
+    image: registry.gitlab.com/tuanxx31/qwen-api:latest
+    container_name: qwen-api
+    restart: unless-stopped
+    ports:
+      - "8990:8990"
+    volumes:
+      - ./config.json:/app/config.json:ro
+    networks:
+      shared-network:
+        aliases:
+          - qwen-api
+    environment:
+      - PYTHONUNBUFFERED=1
+  gemini-api:
+    image: registry.gitlab.com/tuanxx31/gemini-api:latest
+    container_name: gemini-api
+    restart: unless-stopped
+    ports:
+      - "8989:8989"
+    env_file:
+      - .env
+    networks:
+      shared-network:
+        aliases:
+          - gemini-api
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8989/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+networks:
+  shared-network:
+    external: true

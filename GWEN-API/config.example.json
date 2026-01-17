@@ -1,0 +1,26 @@
+{
+    "api_key": "sk-demo",
+    "accounts": [
+        {
+            "name": "Account 1",
+            "cookie_token": "YOUR_QWEN_JWT_TOKEN_1",
+            "cookie_cnaui": "YOUR_CNAUI_1",
+            "cookie_aui": "YOUR_AUI_1",
+            "cookie_bx_ua": "",
+            "cookie_bx_umidtoken": ""
+        },
+        {
+            "name": "Account 2",
+            "cookie_token": "YOUR_QWEN_JWT_TOKEN_2",
+            "cookie_cnaui": "YOUR_CNAUI_2",
+            "cookie_aui": "YOUR_AUI_2",
+            "cookie_bx_ua": "",
+            "cookie_bx_umidtoken": ""
+        }
+    ],
+    "host": "0.0.0.0",
+    "port": 8001,
+    "default_model": "qwen3-max",
+    "timeout": 120,
+    "verbose": false
+}

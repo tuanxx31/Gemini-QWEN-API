@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  nginx:
+    image: nginx:1.27
+    container_name: nginx
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - qwen-api
+      - gemini-api
+    networks:
+      - shared-network
+    volumes:
+      - ./default.conf:/etc/nginx/nginx.conf
+      # - /etc/localtime:/etc/localtime:ro
+
+networks:
+  shared-network:
+    external: true
