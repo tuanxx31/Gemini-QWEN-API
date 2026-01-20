@@ -17,12 +17,16 @@ import json
 import os
 import tempfile
 import time
+import random
 from pathlib import Path
 from typing import Optional, List, Dict
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 
 from fastapi import FastAPI, HTTPException, Header, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -57,8 +61,171 @@ def load_config() -> Dict:
 
 CONFIG = load_config()
 print(CONFIG)
-# Global client instance
-gemini_client: Optional[GeminiClient] = None
+
+# Paths
+ACCOUNTS_PATH = Path(__file__).parent / "accounts.json"
+
+# ============ Account Management ============
+
+@dataclass
+class Account:
+    """Represents a Gemini account."""
+    name: str
+    cookie_1PSID: str
+    cookie_1PSIDTS: str = ""
+    client: Optional[GeminiClient] = None
+    is_active: bool = True
+
+    def __post_init__(self):
+        if not self.cookie_1PSID or self.cookie_1PSID == "YOUR_SECURE_1PSID_HERE":
+            self.is_active = False
+
+
+class AccountManager:
+    """Manages multiple Gemini accounts with round-robin selection."""
+    
+    def __init__(self, accounts_path: Path, timeout: int = 120):
+        self.accounts_path = accounts_path
+        self.timeout = timeout
+        self.accounts: List[Account] = []
+        self.current_index = 0
+        self._load_accounts()
+        print(f"[API] AccountManager initialized with {len(self.accounts)} account(s)")
+    
+    def _load_accounts(self):
+        """Load accounts from accounts.json file."""
+        self.accounts = []
+        
+        if not self.accounts_path.exists():
+            print(f"[WARNING] accounts.json not found at {self.accounts_path}")
+            return
+        
+        try:
+            with open(self.accounts_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            accounts_data = data.get("accounts", [])
+            
+            for acc_data in accounts_data:
+                account = Account(
+                    name=acc_data.get("name", f"Account {len(self.accounts) + 1}"),
+                    cookie_1PSID=acc_data.get("cookie_1PSID", ""),
+                    cookie_1PSIDTS=acc_data.get("cookie_1PSIDTS", "")
+                )
+                if account.cookie_1PSID:
+                    self.accounts.append(account)
+                    print(f"[API] Loaded account: {account.name}")
+            
+            if not self.accounts:
+                print("[WARNING] No valid accounts found in accounts.json")
+        
+        except Exception as e:
+            print(f"[ERROR] Failed to load accounts.json: {e}")
+    
+    async def get_client(self) -> tuple[GeminiClient, Account]:
+        """Get an available client using round-robin selection."""
+        if not self.accounts:
+            raise HTTPException(
+                status_code=500,
+                detail="No accounts configured. Please add accounts via /admin interface"
+            )
+        
+        # Round-robin: get next account
+        account = self.accounts[self.current_index]
+        self.current_index = (self.current_index + 1) % len(self.accounts)
+        
+        # Initialize client if needed
+        if account.client is None or not account.client._running:
+            print(f"[API] Initializing client for account: {account.name}")
+            
+            account.client = GeminiClient(
+                secure_1psid=account.cookie_1PSID,
+                secure_1psidts=account.cookie_1PSIDTS if account.cookie_1PSIDTS and account.cookie_1PSIDTS != "YOUR_SECURE_1PSIDTS_HERE" else None
+            )
+            
+            await account.client.init(
+                timeout=self.timeout,
+                auto_close=False,
+                auto_refresh=True
+            )
+            print(f"[API] Client initialized for account: {account.name}")
+        
+        return account.client, account
+    
+    async def reload(self):
+        """Reload accounts from file and close old clients."""
+        print("[API] Reloading accounts...")
+        
+        # Close all existing clients
+        await self.close_all()
+        
+        # Reload accounts
+        self._load_accounts()
+        self.current_index = 0
+        
+        print(f"[API] Reloaded {len(self.accounts)} account(s)")
+    
+    async def close_all(self):
+        """Close all client sessions."""
+        for account in self.accounts:
+            if account.client and account.client._running:
+                try:
+                    await account.client.close()
+                    print(f"[API] Closed client for account: {account.name}")
+                except Exception as e:
+                    print(f"[API] Error closing client for {account.name}: {e}")
+                finally:
+                    account.client = None
+    
+    def get_status(self) -> List[dict]:
+        """Get status of all accounts."""
+        return [
+            {
+                "name": acc.name,
+                "active": acc.client is not None and acc.client._running if acc.client else False,
+                "is_active": acc.is_active
+            }
+            for acc in self.accounts
+        ]
+    
+    def get_accounts_data(self) -> List[dict]:
+        """Get accounts data for API responses (full data, requires auth)."""
+        return [
+            {
+                "id": idx,
+                "name": acc.name,
+                "cookie_1PSID": acc.cookie_1PSID,
+                "cookie_1PSIDTS": acc.cookie_1PSIDTS,
+                "is_active": acc.is_active,
+                "active": acc.client is not None and acc.client._running if acc.client else False
+            }
+            for idx, acc in enumerate(self.accounts)
+        ]
+    
+    def save_accounts(self):
+        """Save accounts to file."""
+        accounts_data = [
+            {
+                "name": acc.name,
+                "cookie_1PSID": acc.cookie_1PSID,
+                "cookie_1PSIDTS": acc.cookie_1PSIDTS
+            }
+            for acc in self.accounts
+        ]
+        
+        data = {"accounts": accounts_data}
+        
+        try:
+            with open(self.accounts_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            print(f"[API] Saved {len(self.accounts)} account(s) to {self.accounts_path}")
+        except Exception as e:
+            print(f"[ERROR] Failed to save accounts.json: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save accounts: {e}")
+
+
+# Global account manager
+account_manager: Optional[AccountManager] = None
 
 
 # ============ Request/Response Models ============
@@ -92,32 +259,17 @@ class ErrorResponse(BaseModel):
 
 # ============ Gemini Client Management ============
 
-async def get_gemini_client() -> GeminiClient:
-    global gemini_client
-
-    if gemini_client is None or not gemini_client._running:
-        cookie_1psid = CONFIG.get("cookie_1PSID", "")
-        cookie_1psidts = CONFIG.get("cookie_1PSIDTS", "")
-
-        if not cookie_1psid or cookie_1psid == "YOUR_SECURE_1PSID_HERE":
-            raise HTTPException(
-                status_code=500,
-                detail="cookie_1PSID not configured. Please update config.json"
-            )
-
-        gemini_client = GeminiClient(
-            secure_1psid=cookie_1psid,
-            secure_1psidts=cookie_1psidts if cookie_1psidts and cookie_1psidts != "YOUR_SECURE_1PSIDTS_HERE" else None
+async def get_gemini_client() -> tuple[GeminiClient, Account]:
+    """Get Gemini client using AccountManager with round-robin selection."""
+    global account_manager
+    
+    if account_manager is None:
+        raise HTTPException(
+            status_code=500,
+            detail="AccountManager not initialized"
         )
-
-        await gemini_client.init(
-            timeout=CONFIG.get("timeout", 120),
-            auto_close=False,
-            auto_refresh=True
-        )
-        print("[API] Gemini client initialized successfully")
-
-    return gemini_client
+    
+    return await account_manager.get_client()
 
 
 def verify_auth(authorization: Optional[str]) -> bool:
@@ -188,13 +340,14 @@ def get_size_prompt(size: Optional[str]) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    global account_manager
     print(f"[API] Starting Gemini Image API Server on {CONFIG.get('host', '0.0.0.0')}:{CONFIG.get('port', 8000)}")
+    account_manager = AccountManager(ACCOUNTS_PATH, timeout=CONFIG.get("timeout", 120))
     yield
     # Shutdown
-    global gemini_client
-    if gemini_client and gemini_client._running:
-        await gemini_client.close()
-        print("[API] Gemini client closed")
+    if account_manager:
+        await account_manager.close_all()
+        print("[API] All Gemini clients closed")
 
 
 # ============ FastAPI App ============
@@ -205,6 +358,11 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Static files serving
+static_path = Path(__file__).parent / "static"
+if static_path.exists():
+    app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
 # CORS middleware
 app.add_middleware(
@@ -225,9 +383,19 @@ async def root():
         "endpoints": {
             "models": "GET /models",
             "generate": "POST /v1/images/generations",
-            "edit": "POST /v1/images/edits"
+            "edit": "POST /v1/images/edits",
+            "admin": "GET /admin (Web interface for account management)"
         }
     }
+
+
+@app.get("/admin")
+async def admin_interface():
+    """Serve admin web interface."""
+    static_file = Path(__file__).parent / "static" / "index.html"
+    if static_file.exists():
+        return FileResponse(str(static_file))
+    raise HTTPException(status_code=404, detail="Admin interface not found")
 
 
 # Models data
@@ -304,7 +472,7 @@ async def generate_image(
         raise HTTPException(status_code=401, detail="Invalid authorization token")
 
     try:
-        client = await get_gemini_client()
+        client, account = await get_gemini_client()
 
         # Build prompt with size modifier
         full_prompt = request.prompt + get_size_prompt(request.size)
@@ -313,7 +481,7 @@ async def generate_image(
         if request.seed:
             full_prompt += f" (seed: {request.seed})"
 
-        print(f"[API] Generating image with prompt: {full_prompt[:100]}...")
+        print(f"[API] [{account.name}] Generating image with prompt: {full_prompt[:100]}...")
 
         # Call Gemini API
         response = await client.generate_content(
@@ -351,7 +519,7 @@ async def generate_image(
         if not image_data_list:
             raise HTTPException(status_code=500, detail="Failed to download generated images")
 
-        print(f"[API] Successfully generated {len(image_data_list)} image(s)")
+        print(f"[API] [{account.name}] Successfully generated {len(image_data_list)} image(s)")
 
         return ImageResponse(
             created=int(time.time()),
@@ -386,7 +554,7 @@ async def edit_image(
     temp_path = None
 
     try:
-        client = await get_gemini_client()
+        client, account = await get_gemini_client()
 
         # Save uploaded image to temp file
         fd, temp_path = tempfile.mkstemp(suffix=".png")
@@ -399,7 +567,7 @@ async def edit_image(
         # Build prompt with size modifier
         full_prompt = prompt + get_size_prompt(size)
 
-        print(f"[API] Editing image with prompt: {full_prompt[:100]}...")
+        print(f"[API] [{account.name}] Editing image with prompt: {full_prompt[:100]}...")
 
         # Call Gemini API with image
         response = await client.generate_content(
@@ -437,7 +605,7 @@ async def edit_image(
         if not image_data_list:
             raise HTTPException(status_code=500, detail="Failed to download generated images")
 
-        print(f"[API] Successfully edited image, got {len(image_data_list)} result(s)")
+        print(f"[API] [{account.name}] Successfully edited image, got {len(image_data_list)} result(s)")
 
         return ImageResponse(
             created=int(time.time()),
@@ -458,10 +626,198 @@ async def edit_image(
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    global gemini_client
+    global account_manager
     return {
         "status": "healthy",
-        "gemini_client_active": gemini_client is not None and gemini_client._running
+        "total_accounts": len(account_manager.accounts) if account_manager else 0,
+        "accounts": account_manager.get_status() if account_manager else []
+    }
+
+
+# ============ Admin Endpoints ============
+
+class AccountCreateRequest(BaseModel):
+    name: str = Field(..., description="Account name")
+    cookie_1PSID: str = Field(..., description="Cookie 1PSID")
+    cookie_1PSIDTS: str = Field(default="", description="Cookie 1PSIDTS (optional)")
+
+
+class AccountUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, description="Account name")
+    cookie_1PSID: Optional[str] = Field(None, description="Cookie 1PSID")
+    cookie_1PSIDTS: Optional[str] = Field(None, description="Cookie 1PSIDTS")
+
+
+@app.get("/admin/accounts")
+async def get_accounts(authorization: Optional[str] = Header(None)):
+    """Get all accounts (requires auth)."""
+    if not verify_auth(authorization):
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+    
+    global account_manager
+    if account_manager is None:
+        raise HTTPException(status_code=500, detail="AccountManager not initialized")
+    
+    return {
+        "total_accounts": len(account_manager.accounts),
+        "accounts": account_manager.get_accounts_data()
+    }
+
+
+@app.get("/admin/accounts/{account_id}")
+async def get_account(account_id: int, authorization: Optional[str] = Header(None)):
+    """Get detailed account information (requires auth)."""
+    if not verify_auth(authorization):
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+    
+    global account_manager
+    if account_manager is None:
+        raise HTTPException(status_code=500, detail="AccountManager not initialized")
+    
+    if account_id < 0 or account_id >= len(account_manager.accounts):
+        raise HTTPException(status_code=404, detail=f"Account {account_id} not found")
+    
+    account = account_manager.accounts[account_id]
+    return {
+        "id": account_id,
+        "name": account.name,
+        "cookie_1PSID": account.cookie_1PSID,
+        "cookie_1PSIDTS": account.cookie_1PSIDTS,
+        "is_active": account.is_active,
+        "client_active": account.client is not None and account.client._running if account.client else False
+    }
+
+
+@app.post("/admin/accounts")
+async def create_account(
+    request: AccountCreateRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Add a new account (requires auth)."""
+    if not verify_auth(authorization):
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+    
+    global account_manager
+    if account_manager is None:
+        raise HTTPException(status_code=500, detail="AccountManager not initialized")
+    
+    # Create new account
+    new_account = Account(
+        name=request.name,
+        cookie_1PSID=request.cookie_1PSID,
+        cookie_1PSIDTS=request.cookie_1PSIDTS
+    )
+    
+    account_manager.accounts.append(new_account)
+    account_manager.save_accounts()
+    
+    return {
+        "message": "Account added successfully",
+        "account": {
+            "id": len(account_manager.accounts) - 1,
+            "name": new_account.name,
+            "is_active": new_account.is_active
+        }
+    }
+
+
+@app.put("/admin/accounts/{account_id}")
+async def update_account(
+    account_id: int,
+    request: AccountUpdateRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Update an account (requires auth)."""
+    if not verify_auth(authorization):
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+    
+    global account_manager
+    if account_manager is None:
+        raise HTTPException(status_code=500, detail="AccountManager not initialized")
+    
+    if account_id < 0 or account_id >= len(account_manager.accounts):
+        raise HTTPException(status_code=404, detail=f"Account {account_id} not found")
+    
+    account = account_manager.accounts[account_id]
+    
+    # Close existing client if updating credentials
+    if request.cookie_1PSID and request.cookie_1PSID != account.cookie_1PSID:
+        if account.client and account.client._running:
+            await account.client.close()
+            account.client = None
+    
+    # Update account
+    if request.name is not None:
+        account.name = request.name
+    if request.cookie_1PSID is not None:
+        account.cookie_1PSID = request.cookie_1PSID
+        account.is_active = bool(request.cookie_1PSID and request.cookie_1PSID != "YOUR_SECURE_1PSID_HERE")
+    if request.cookie_1PSIDTS is not None:
+        account.cookie_1PSIDTS = request.cookie_1PSIDTS
+    
+    account_manager.save_accounts()
+    
+    return {
+        "message": "Account updated successfully",
+        "account": {
+            "id": account_id,
+            "name": account.name,
+            "is_active": account.is_active
+        }
+    }
+
+
+@app.delete("/admin/accounts/{account_id}")
+async def delete_account(
+    account_id: int,
+    authorization: Optional[str] = Header(None)
+):
+    """Delete an account (requires auth)."""
+    if not verify_auth(authorization):
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+    
+    global account_manager
+    if account_manager is None:
+        raise HTTPException(status_code=500, detail="AccountManager not initialized")
+    
+    if account_id < 0 or account_id >= len(account_manager.accounts):
+        raise HTTPException(status_code=404, detail=f"Account {account_id} not found")
+    
+    account = account_manager.accounts[account_id]
+    
+    # Close client if exists
+    if account.client and account.client._running:
+        await account.client.close()
+    
+    # Remove account
+    account_manager.accounts.pop(account_id)
+    account_manager.save_accounts()
+    
+    # Reset current_index if needed
+    if account_manager.current_index >= len(account_manager.accounts):
+        account_manager.current_index = 0
+    
+    return {
+        "message": "Account deleted successfully",
+        "deleted_account_id": account_id
+    }
+
+
+@app.post("/admin/accounts/reload")
+async def reload_accounts(authorization: Optional[str] = Header(None)):
+    """Reload accounts from file (requires auth)."""
+    if not verify_auth(authorization):
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+    
+    global account_manager
+    if account_manager is None:
+        raise HTTPException(status_code=500, detail="AccountManager not initialized")
+    
+    await account_manager.reload()
+    
+    return {
+        "message": "Accounts reloaded successfully",
+        "total_accounts": len(account_manager.accounts)
     }
 
 

@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini API - Account Management</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            padding: 30px;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .header-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        
+        .auth-section {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        
+        .auth-section input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        
+        .auth-section button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        .auth-section button:hover {
+            background: #5568d3;
+        }
+        
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+        
+        button:hover {
+            background: #5568d3;
+        }
+        
+        button.danger {
+            background: #e74c3c;
+        }
+        
+        button.danger:hover {
+            background: #c0392b;
+        }
+        
+        button.secondary {
+            background: #95a5a6;
+        }
+        
+        button.secondary:hover {
+            background: #7f8c8d;
+        }
+        
+        .form-section {
+            background: #f9f9f9;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+        }
+        
+        .form-section h2 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 20px;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #555;
+            font-weight: 500;
+            font-size: 14px;
+        }
+        
+        .form-group input,
+        .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        
+        .form-group textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+        
+        .accounts-list {
+            margin-top: 30px;
+        }
+        
+        .accounts-list h2 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 20px;
+        }
+        
+        .account-card {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .account-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .account-name {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .account-status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        .status-active {
+            background: #2ecc71;
+            color: white;
+        }
+        
+        .status-inactive {
+            background: #e74c3c;
+            color: white;
+        }
+        
+        .account-details {
+            color: #666;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+        
+        .account-details div {
+            margin-bottom: 5px;
+        }
+        
+        .account-actions {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+        }
+        
+        .message {
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+        
+        .message.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .message.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .hidden {
+            display: none;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 Gemini API - Account Management</h1>
+        <p class="subtitle">Quản lý tài khoản Gemini cho API server</p>
+        
+        <div class="auth-section">
+            <input type="text" id="apiKey" placeholder="Nhập API Key (Bearer token)" />
+            <button onclick="setApiKey()">Xác thực</button>
+        </div>
+        
+        <div id="message"></div>
+        
+        <div id="mainContent" class="hidden">
+            <div class="header-actions">
+                <h2>Danh sách Accounts</h2>
+                <div>
+                    <button onclick="reloadAccounts()" class="secondary">🔄 Reload</button>
+                    <button onclick="showAddForm()">➕ Thêm Account</button>
+                </div>
+            </div>
+            
+            <div class="form-section hidden" id="addForm">
+                <h2>Thêm Account Mới</h2>
+                <div class="form-group">
+                    <label>Tên Account:</label>
+                    <input type="text" id="addName" placeholder="Ví dụ: Account 1" />
+                </div>
+                <div class="form-group">
+                    <label>Cookie 1PSID:</label>
+                    <textarea id="add1PSID" placeholder="Nhập cookie __Secure-1PSID"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Cookie 1PSIDTS (tùy chọn):</label>
+                    <textarea id="add1PSIDTS" placeholder="Nhập cookie __Secure-1PSIDTS (có thể để trống)"></textarea>
+                </div>
+                <div class="account-actions">
+                    <button onclick="addAccount()">Lưu</button>
+                    <button onclick="hideAddForm()" class="secondary">Hủy</button>
+                </div>
+            </div>
+            
+            <div class="form-section hidden" id="editForm">
+                <h2>Sửa Account</h2>
+                <input type="hidden" id="editId" />
+                <div class="form-group">
+                    <label>Tên Account:</label>
+                    <input type="text" id="editName" />
+                </div>
+                <div class="form-group">
+                    <label>Cookie 1PSID:</label>
+                    <textarea id="edit1PSID"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Cookie 1PSIDTS (tùy chọn):</label>
+                    <textarea id="edit1PSIDTS"></textarea>
+                </div>
+                <div class="account-actions">
+                    <button onclick="updateAccount()">Cập nhật</button>
+                    <button onclick="hideEditForm()" class="secondary">Hủy</button>
+                </div>
+            </div>
+            
+            <div class="accounts-list">
+                <div id="accountsContainer">
+                    <div class="loading">Đang tải...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let apiKey = '';
+        
+        function setApiKey() {
+            const key = document.getElementById('apiKey').value.trim();
+            if (!key) {
+                showMessage('Vui lòng nhập API Key', 'error');
+                return;
+            }
+            apiKey = key;
+            document.getElementById('mainContent').classList.remove('hidden');
+            loadAccounts();
+        }
+        
+        function getHeaders() {
+            return {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+            };
+        }
+        
+        function showMessage(text, type = 'success') {
+            const msgDiv = document.getElementById('message');
+            msgDiv.textContent = text;
+            msgDiv.className = `message ${type}`;
+            msgDiv.classList.remove('hidden');
+            setTimeout(() => {
+                msgDiv.classList.add('hidden');
+            }, 5000);
+        }
+        
+        async function loadAccounts() {
+            try {
+                const response = await fetch('/admin/accounts', {
+                    headers: getHeaders()
+                });
+                
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        showMessage('API Key không hợp lệ', 'error');
+                        document.getElementById('mainContent').classList.add('hidden');
+                        return;
+                    }
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const data = await response.json();
+                displayAccounts(data.accounts);
+            } catch (error) {
+                showMessage('Lỗi khi tải danh sách accounts: ' + error.message, 'error');
+            }
+        }
+        
+        function displayAccounts(accounts) {
+            const container = document.getElementById('accountsContainer');
+            
+            if (accounts.length === 0) {
+                container.innerHTML = '<div class="loading">Chưa có account nào. Hãy thêm account đầu tiên!</div>';
+                return;
+            }
+            
+            container.innerHTML = accounts.map((acc, idx) => `
+                <div class="account-card">
+                    <div class="account-header">
+                        <div class="account-name">${escapeHtml(acc.name)}</div>
+                        <span class="account-status ${acc.is_active ? 'status-active' : 'status-inactive'}">
+                            ${acc.is_active ? '✓ Active' : '✗ Inactive'}
+                        </span>
+                    </div>
+                    <div class="account-details">
+                        <div><strong>ID:</strong> ${acc.id}</div>
+                        <div><strong>1PSID:</strong> ${escapeHtml(acc.cookie_1PSID.length > 50 ? acc.cookie_1PSID.substring(0, 50) + '...' : acc.cookie_1PSID)}</div>
+                        <div><strong>1PSIDTS:</strong> ${escapeHtml(acc.cookie_1PSIDTS || '(không có)')}</div>
+                        <div><strong>Client Active:</strong> ${acc.active ? 'Có' : 'Không'}</div>
+                    </div>
+                    <div class="account-actions">
+                        <button onclick="editAccount(${acc.id})">✏️ Sửa</button>
+                        <button onclick="deleteAccount(${acc.id})" class="danger">🗑️ Xóa</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        function showAddForm() {
+            document.getElementById('addForm').classList.remove('hidden');
+            document.getElementById('editForm').classList.add('hidden');
+            document.getElementById('addName').value = '';
+            document.getElementById('add1PSID').value = '';
+            document.getElementById('add1PSIDTS').value = '';
+        }
+        
+        function hideAddForm() {
+            document.getElementById('addForm').classList.add('hidden');
+        }
+        
+        async function addAccount() {
+            const name = document.getElementById('addName').value.trim();
+            const cookie1PSID = document.getElementById('add1PSID').value.trim();
+            const cookie1PSIDTS = document.getElementById('add1PSIDTS').value.trim();
+            
+            if (!name || !cookie1PSID) {
+                showMessage('Vui lòng điền đầy đủ thông tin (ít nhất là Tên và Cookie 1PSID)', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/admin/accounts', {
+                    method: 'POST',
+                    headers: getHeaders(),
+                    body: JSON.stringify({
+                        name: name,
+                        cookie_1PSID: cookie1PSID,
+                        cookie_1PSIDTS: cookie1PSIDTS
+                    })
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || `HTTP ${response.status}`);
+                }
+                
+                showMessage('Thêm account thành công!');
+                hideAddForm();
+                await reloadAccounts();
+            } catch (error) {
+                showMessage('Lỗi khi thêm account: ' + error.message, 'error');
+            }
+        }
+        
+        function editAccount(id) {
+            fetch(`/admin/accounts/${id}`, { headers: getHeaders() })
+                .then(res => res.json())
+                .then(account => {
+                    document.getElementById('editId').value = id;
+                    document.getElementById('editName').value = account.name;
+                    document.getElementById('edit1PSID').value = account.cookie_1PSID || '';
+                    document.getElementById('edit1PSIDTS').value = account.cookie_1PSIDTS || '';
+                    
+                    document.getElementById('editForm').classList.remove('hidden');
+                    document.getElementById('addForm').classList.add('hidden');
+                })
+                .catch(error => {
+                    showMessage('Lỗi khi tải thông tin account: ' + error.message, 'error');
+                });
+        }
+        
+        function hideEditForm() {
+            document.getElementById('editForm').classList.add('hidden');
+        }
+        
+        async function updateAccount() {
+            const id = parseInt(document.getElementById('editId').value);
+            const name = document.getElementById('editName').value.trim();
+            const cookie1PSID = document.getElementById('edit1PSID').value.trim();
+            const cookie1PSIDTS = document.getElementById('edit1PSIDTS').value.trim();
+            
+            const updateData = {};
+            if (name) updateData.name = name;
+            if (cookie1PSID) updateData.cookie_1PSID = cookie1PSID;
+            if (cookie1PSIDTS !== undefined) updateData.cookie_1PSIDTS = cookie1PSIDTS;
+            
+            if (Object.keys(updateData).length === 0) {
+                showMessage('Vui lòng điền ít nhất một trường để cập nhật', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/admin/accounts/${id}`, {
+                    method: 'PUT',
+                    headers: getHeaders(),
+                    body: JSON.stringify(updateData)
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || `HTTP ${response.status}`);
+                }
+                
+                showMessage('Cập nhật account thành công!');
+                hideEditForm();
+                await reloadAccounts();
+            } catch (error) {
+                showMessage('Lỗi khi cập nhật account: ' + error.message, 'error');
+            }
+        }
+        
+        async function deleteAccount(id) {
+            if (!confirm(`Bạn có chắc chắn muốn xóa account ID ${id}?`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/admin/accounts/${id}`, {
+                    method: 'DELETE',
+                    headers: getHeaders()
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || `HTTP ${response.status}`);
+                }
+                
+                showMessage('Xóa account thành công!');
+                await reloadAccounts();
+            } catch (error) {
+                showMessage('Lỗi khi xóa account: ' + error.message, 'error');
+            }
+        }
+        
+        async function reloadAccounts() {
+            try {
+                const response = await fetch('/admin/accounts/reload', {
+                    method: 'POST',
+                    headers: getHeaders()
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || `HTTP ${response.status}`);
+                }
+                
+                showMessage('Reload accounts thành công!');
+                await loadAccounts();
+            } catch (error) {
+                showMessage('Lỗi khi reload accounts: ' + error.message, 'error');
+            }
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
+

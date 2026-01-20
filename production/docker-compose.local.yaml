@@ -1,11 +1,11 @@
 services:
   qwen-api:
     build:
-      context: .
+      context: ../GWEN-API
       dockerfile: Dockerfile
-    image: registry.gitlab.com/tuanxx31/qwen-api:latest
+    image: registry.gitlab.com/tuanxx31/gemini-qwen-api/qwen-api:latest
   gemini-api:
     build:
-      context: .
+      context: ../Gemini-API
       dockerfile: Dockerfile
-    image: registry.gitlab.com/tuanxx31/gemini-api:latest
+    image: registry.gitlab.com/tuanxx31/gemini-qwen-api/gemini-api:latest

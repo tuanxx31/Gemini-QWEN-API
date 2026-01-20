@@ -1,6 +1,6 @@
 services:
   qwen-api:
-    image: registry.gitlab.com/tuanxx31/qwen-api:latest
+    image: registry.gitlab.com/tuanxx31/gemini-qwen-api/qwen-api:latest
     container_name: qwen-api
     restart: unless-stopped
     ports:
@@ -14,7 +14,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
   gemini-api:
-    image: registry.gitlab.com/tuanxx31/gemini-api:latest
+    image: registry.gitlab.com/tuanxx31/gemini-qwen-api/gemini-api:latest
     container_name: gemini-api
     restart: unless-stopped
     ports:
