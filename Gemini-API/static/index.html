@@ -199,6 +199,30 @@
             color: white;
         }
         
+        .expiry-status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            margin-left: 10px;
+        }
+        
+        .expiry-status.expired {
+            background: #e74c3c;
+            color: white;
+        }
+        
+        .expiry-status.warning {
+            background: #f39c12;
+            color: white;
+        }
+        
+        .expiry-status.valid {
+            background: #2ecc71;
+            color: white;
+        }
+        
         .account-details {
             color: #666;
             font-size: 14px;
@@ -250,7 +274,7 @@
         <h1>🔐 Gemini API - Account Management</h1>
         <p class="subtitle">Quản lý tài khoản Gemini cho API server</p>
         
-        <div class="auth-section">
+        <div class="auth-section" id="authSection">
             <h3 style="margin-bottom: 15px; color: #333;">Đăng nhập Admin</h3>
             <input type="text" id="username" placeholder="Tên đăng nhập" />
             <input type="password" id="password" placeholder="Mật khẩu" />
@@ -265,6 +289,7 @@
                 <div>
                     <button onclick="reloadAccounts()" class="secondary">🔄 Reload</button>
                     <button onclick="showAddForm()">➕ Thêm Account</button>
+                    <button onclick="logout()" class="secondary" style="background: #95a5a6;">🚪 Đăng xuất</button>
                 </div>
             </div>
             
@@ -318,7 +343,77 @@
     </div>
     
     <script>
+        const ADMIN_TOKEN_KEY = 'gemini_admin_token';
         let adminToken = '';
+        
+        // Load token from localStorage khi trang load
+        function loadStoredToken() {
+            const storedToken = localStorage.getItem(ADMIN_TOKEN_KEY);
+            if (storedToken) {
+                adminToken = storedToken;
+                // Kiểm tra token còn hợp lệ không
+                checkTokenValidity();
+            }
+        }
+        
+        // Kiểm tra token còn hợp lệ không
+        async function checkTokenValidity() {
+            const authSection = document.getElementById('authSection');
+            const mainContent = document.getElementById('mainContent');
+            
+            if (!authSection || !mainContent) {
+                console.error('Required elements not found');
+                return;
+            }
+            
+            if (!adminToken) {
+                // Không có token, hiển thị form đăng nhập
+                authSection.classList.remove('hidden');
+                mainContent.classList.add('hidden');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/admin/accounts', {
+                    headers: getHeaders()
+                });
+                
+                if (response.ok) {
+                    // Token hợp lệ, ẩn form đăng nhập và hiển thị nội dung
+                    authSection.classList.add('hidden');
+                    mainContent.classList.remove('hidden');
+                    loadAccounts();
+                } else if (response.status === 401) {
+                    // Token hết hạn, xóa khỏi localStorage và hiển thị form đăng nhập
+                    adminToken = '';
+                    localStorage.removeItem(ADMIN_TOKEN_KEY);
+                    authSection.classList.remove('hidden');
+                    mainContent.classList.add('hidden');
+                }
+            } catch (error) {
+                console.error('Error checking token:', error);
+                // Lỗi, hiển thị form đăng nhập
+                authSection.classList.remove('hidden');
+                mainContent.classList.add('hidden');
+            }
+        }
+        
+        // Hàm helper để lấy element an toàn
+        function getElementSafely(id) {
+            const element = document.getElementById(id);
+            if (!element) {
+                console.error(`Element with id '${id}' not found`);
+            }
+            return element;
+        }
+        
+        // Load token khi trang load (đợi DOM ready)
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', loadStoredToken);
+        } else {
+            // DOM đã sẵn sàng
+            loadStoredToken();
+        }
         
         async function adminLogin() {
             const username = document.getElementById('username').value.trim();
@@ -349,8 +444,16 @@
                 const data = await response.json();
                 if (data.success && data.token) {
                     adminToken = data.token;
-                    showMessage('Đăng nhập thành công!', 'success');
-                    document.getElementById('mainContent').classList.remove('hidden');
+                    // Lưu token vào localStorage (session 12 giờ)
+                    localStorage.setItem(ADMIN_TOKEN_KEY, adminToken);
+                    showMessage('Đăng nhập thành công! Session sẽ hết hạn sau 12 giờ.', 'success');
+                    // Ẩn form đăng nhập và hiển thị nội dung
+                    const authSection = getElementSafely('authSection');
+                    const mainContent = getElementSafely('mainContent');
+                    if (authSection && mainContent) {
+                        authSection.classList.add('hidden');
+                        mainContent.classList.remove('hidden');
+                    }
                     loadAccounts();
                 } else {
                     throw new Error(data.message || 'Đăng nhập thất bại');
@@ -365,6 +468,37 @@
                 'Authorization': `Bearer ${adminToken}`,
                 'Content-Type': 'application/json'
             };
+        }
+        
+        // Hàm đăng xuất
+        function logout() {
+            adminToken = '';
+            localStorage.removeItem(ADMIN_TOKEN_KEY);
+            const authSection = getElementSafely('authSection');
+            const mainContent = getElementSafely('mainContent');
+            if (authSection && mainContent) {
+                authSection.classList.remove('hidden');
+                mainContent.classList.add('hidden');
+            }
+            // Xóa giá trị form đăng nhập
+            const usernameInput = getElementSafely('username');
+            const passwordInput = getElementSafely('password');
+            if (usernameInput) usernameInput.value = '';
+            if (passwordInput) passwordInput.value = '';
+            showMessage('Đã đăng xuất thành công', 'success');
+        }
+        
+        // Hàm helper xử lý lỗi 401 (session hết hạn)
+        function handleUnauthorized() {
+            adminToken = '';
+            localStorage.removeItem(ADMIN_TOKEN_KEY);
+            const authSection = getElementSafely('authSection');
+            const mainContent = getElementSafely('mainContent');
+            if (authSection && mainContent) {
+                authSection.classList.remove('hidden');
+                mainContent.classList.add('hidden');
+            }
+            showMessage('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại', 'error');
         }
         
         function showMessage(text, type = 'success') {
@@ -385,9 +519,7 @@
                 
                 if (!response.ok) {
                     if (response.status === 401) {
-                        showMessage('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại', 'error');
-                        document.getElementById('mainContent').classList.add('hidden');
-                        adminToken = '';
+                        handleUnauthorized();
                         return;
                     }
                     throw new Error(`HTTP ${response.status}`);
@@ -400,6 +532,65 @@
             }
         }
         
+        function calculateExpiryStatus(createdAt, updatedAt) {
+            // Use updated_at if available, otherwise use created_at
+            const timestamp = updatedAt || createdAt;
+            if (!timestamp) {
+                return {
+                    status: 'valid',
+                    hoursRemaining: 24,
+                    message: 'Chưa có thông tin thời gian'
+                };
+            }
+            
+            // Parse timestamp (format: YYYY-MM-DDTHH:MM:SS)
+            const timestampDate = new Date(timestamp + 'Z'); // Add Z for UTC
+            const now = new Date();
+            const diffMs = now - timestampDate;
+            const diffHours = diffMs / (1000 * 60 * 60);
+            const hoursRemaining = 24 - diffHours;
+            
+            if (hoursRemaining <= 0) {
+                // Expired (quá 24h)
+                return {
+                    status: 'expired',
+                    hoursRemaining: Math.abs(hoursRemaining),
+                    message: `Đã hết hạn ${Math.round(Math.abs(hoursRemaining) * 10) / 10} giờ`
+                };
+            } else if (hoursRemaining <= 2) {
+                // Warning (còn ≤ 2h)
+                return {
+                    status: 'warning',
+                    hoursRemaining: hoursRemaining,
+                    message: `Còn ${Math.round(hoursRemaining * 10) / 10} giờ`
+                };
+            } else {
+                // Valid (còn > 2h)
+                return {
+                    status: 'valid',
+                    hoursRemaining: hoursRemaining,
+                    message: `Còn ${Math.round(hoursRemaining * 10) / 10} giờ`
+                };
+            }
+        }
+        
+        function formatTimestamp(timestamp) {
+            if (!timestamp) return 'Chưa có';
+            try {
+                const date = new Date(timestamp + 'Z');
+                return date.toLocaleString('vi-VN', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                });
+            } catch (e) {
+                return timestamp;
+            }
+        }
+        
         function displayAccounts(accounts) {
             const container = document.getElementById('accountsContainer');
             
@@ -408,26 +599,36 @@
                 return;
             }
             
-            container.innerHTML = accounts.map((acc, idx) => `
+            container.innerHTML = accounts.map((acc, idx) => {
+                const expiryStatus = calculateExpiryStatus(acc.created_at, acc.updated_at);
+                return `
                 <div class="account-card">
                     <div class="account-header">
                         <div class="account-name">${escapeHtml(acc.name)}</div>
-                        <span class="account-status ${acc.is_active ? 'status-active' : 'status-inactive'}">
-                            ${acc.is_active ? '✓ Active' : '✗ Inactive'}
-                        </span>
+                        <div>
+                            <span class="account-status ${acc.is_active ? 'status-active' : 'status-inactive'}">
+                                ${acc.is_active ? '✓ Active' : '✗ Inactive'}
+                            </span>
+                            <span class="expiry-status ${expiryStatus.status}" title="${expiryStatus.message}">
+                                ${expiryStatus.message}
+                            </span>
+                        </div>
                     </div>
                     <div class="account-details">
                         <div><strong>ID:</strong> ${acc.id}</div>
                         <div><strong>1PSID:</strong> ${escapeHtml(acc.cookie_1PSID.length > 50 ? acc.cookie_1PSID.substring(0, 50) + '...' : acc.cookie_1PSID)}</div>
                         <div><strong>1PSIDTS:</strong> ${escapeHtml(acc.cookie_1PSIDTS || '(không có)')}</div>
                         <div><strong>Client Active:</strong> ${acc.active ? 'Có' : 'Không'}</div>
+                        <div><strong>Ngày tạo:</strong> ${formatTimestamp(acc.created_at)}</div>
+                        <div><strong>Cập nhật lần cuối:</strong> ${formatTimestamp(acc.updated_at)}</div>
                     </div>
                     <div class="account-actions">
                         <button onclick="editAccount(${acc.id})">✏️ Sửa</button>
                         <button onclick="deleteAccount(${acc.id})" class="danger">🗑️ Xóa</button>
                     </div>
                 </div>
-            `).join('');
+            `;
+            }).join('');
         }
         
         function showAddForm() {
@@ -464,6 +665,10 @@
                 });
                 
                 if (!response.ok) {
+                    if (response.status === 401) {
+                        handleUnauthorized();
+                        return;
+                    }
                     const error = await response.json();
                     throw new Error(error.detail || `HTTP ${response.status}`);
                 }
@@ -478,7 +683,16 @@
         
         function editAccount(id) {
             fetch(`/admin/accounts/${id}`, { headers: getHeaders() })
-                .then(res => res.json())
+                .then(res => {
+                    if (!res.ok) {
+                        if (res.status === 401) {
+                            handleUnauthorized();
+                            return Promise.reject(new Error('Unauthorized'));
+                        }
+                        return res.json().then(err => Promise.reject(new Error(err.detail || `HTTP ${res.status}`)));
+                    }
+                    return res.json();
+                })
                 .then(account => {
                     document.getElementById('editId').value = id;
                     document.getElementById('editName').value = account.name;
@@ -489,7 +703,9 @@
                     document.getElementById('addForm').classList.add('hidden');
                 })
                 .catch(error => {
-                    showMessage('Lỗi khi tải thông tin account: ' + error.message, 'error');
+                    if (error.message !== 'Unauthorized') {
+                        showMessage('Lỗi khi tải thông tin account: ' + error.message, 'error');
+                    }
                 });
         }
         
@@ -521,6 +737,10 @@
                 });
                 
                 if (!response.ok) {
+                    if (response.status === 401) {
+                        handleUnauthorized();
+                        return;
+                    }
                     const error = await response.json();
                     throw new Error(error.detail || `HTTP ${response.status}`);
                 }
@@ -545,6 +765,10 @@
                 });
                 
                 if (!response.ok) {
+                    if (response.status === 401) {
+                        handleUnauthorized();
+                        return;
+                    }
                     const error = await response.json();
                     throw new Error(error.detail || `HTTP ${response.status}`);
                 }
@@ -564,6 +788,10 @@
                 });
                 
                 if (!response.ok) {
+                    if (response.status === 401) {
+                        handleUnauthorized();
+                        return;
+                    }
                     const error = await response.json();
                     throw new Error(error.detail || `HTTP ${response.status}`);
                 }

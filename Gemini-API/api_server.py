@@ -74,8 +74,10 @@ ADMIN_ACCOUNTS = {
     "kinlaster@admin": "admin@kinlaster123@@zz",
 }
 
-# Active admin sessions: token -> username
-admin_sessions: Dict[str, str] = {}
+# Active admin sessions: token -> {username: str, created_at: float}
+# Session hết hạn sau 12 giờ (43200 giây)
+admin_sessions: Dict[str, dict] = {}
+SESSION_DURATION = 12 * 60 * 60  # 12 giờ
 
 
 def verify_admin_credentials(username: str, password: str) -> bool:
@@ -84,15 +86,44 @@ def verify_admin_credentials(username: str, password: str) -> bool:
 
 
 def create_admin_session(username: str) -> str:
-    """Tạo session token cho admin."""
+    """Tạo session token cho admin với thời hạn 12 giờ."""
     token = secrets.token_urlsafe(32)
-    admin_sessions[token] = username
+    admin_sessions[token] = {
+        "username": username,
+        "created_at": time.time()
+    }
     return token
 
 
 def verify_admin_session(token: str) -> Optional[str]:
-    """Xác thực admin session token, trả về username nếu hợp lệ."""
-    return admin_sessions.get(token)
+    """Xác thực admin session token, trả về username nếu hợp lệ và chưa hết hạn."""
+    if token not in admin_sessions:
+        return None
+    
+    session = admin_sessions[token]
+    created_at = session.get("created_at", 0)
+    elapsed = time.time() - created_at
+    
+    # Kiểm tra hết hạn (12 giờ)
+    if elapsed > SESSION_DURATION:
+        # Xóa session hết hạn
+        del admin_sessions[token]
+        return None
+    
+    return session.get("username")
+
+
+def cleanup_expired_sessions():
+    """Dọn dẹp các session đã hết hạn."""
+    current_time = time.time()
+    expired_tokens = [
+        token for token, session in admin_sessions.items()
+        if current_time - session.get("created_at", 0) > SESSION_DURATION
+    ]
+    for token in expired_tokens:
+        del admin_sessions[token]
+    if expired_tokens:
+        print(f"[API] Cleaned up {len(expired_tokens)} expired admin session(s)")
 
 # ============ Account Management ============
 
@@ -104,6 +135,8 @@ class Account:
     cookie_1PSIDTS: str = ""
     client: Optional[GeminiClient] = None
     is_active: bool = True
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
     def __post_init__(self):
         if not self.cookie_1PSID or self.cookie_1PSID == "YOUR_SECURE_1PSID_HERE":
@@ -135,11 +168,20 @@ class AccountManager:
             
             accounts_data = data.get("accounts", [])
             
+            # Get current timestamp for fallback
+            current_timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+            
             for acc_data in accounts_data:
+                # Load timestamps, fallback to current time for old accounts
+                created_at = acc_data.get("created_at", current_timestamp)
+                updated_at = acc_data.get("updated_at", current_timestamp)
+                
                 account = Account(
                     name=acc_data.get("name", f"Account {len(self.accounts) + 1}"),
                     cookie_1PSID=acc_data.get("cookie_1PSID", ""),
-                    cookie_1PSIDTS=acc_data.get("cookie_1PSIDTS", "")
+                    cookie_1PSIDTS=acc_data.get("cookie_1PSIDTS", ""),
+                    created_at=created_at,
+                    updated_at=updated_at
                 )
                 if account.cookie_1PSID:
                     self.accounts.append(account)
@@ -226,7 +268,9 @@ class AccountManager:
                 "cookie_1PSID": acc.cookie_1PSID,
                 "cookie_1PSIDTS": acc.cookie_1PSIDTS,
                 "is_active": acc.is_active,
-                "active": acc.client is not None and acc.client._running if acc.client else False
+                "active": acc.client is not None and acc.client._running if acc.client else False,
+                "created_at": acc.created_at,
+                "updated_at": acc.updated_at
             }
             for idx, acc in enumerate(self.accounts)
         ]
@@ -237,7 +281,9 @@ class AccountManager:
             {
                 "name": acc.name,
                 "cookie_1PSID": acc.cookie_1PSID,
-                "cookie_1PSIDTS": acc.cookie_1PSIDTS
+                "cookie_1PSIDTS": acc.cookie_1PSIDTS,
+                "created_at": acc.created_at or time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+                "updated_at": acc.updated_at or time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
             }
             for acc in self.accounts
         ]
@@ -758,7 +804,9 @@ async def get_account(account_id: int, authorization: Optional[str] = Header(Non
         "cookie_1PSID": account.cookie_1PSID,
         "cookie_1PSIDTS": account.cookie_1PSIDTS,
         "is_active": account.is_active,
-        "client_active": account.client is not None and account.client._running if account.client else False
+        "client_active": account.client is not None and account.client._running if account.client else False,
+        "created_at": account.created_at,
+        "updated_at": account.updated_at
     }
 
 
@@ -775,11 +823,14 @@ async def create_account(
     if account_manager is None:
         raise HTTPException(status_code=500, detail="AccountManager not initialized")
     
-    # Create new account
+    # Create new account with timestamps
+    current_timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     new_account = Account(
         name=request.name,
         cookie_1PSID=request.cookie_1PSID,
-        cookie_1PSIDTS=request.cookie_1PSIDTS
+        cookie_1PSIDTS=request.cookie_1PSIDTS,
+        created_at=current_timestamp,
+        updated_at=current_timestamp
     )
     
     account_manager.accounts.append(new_account)
@@ -828,6 +879,12 @@ async def update_account(
         account.is_active = bool(request.cookie_1PSID and request.cookie_1PSID != "YOUR_SECURE_1PSID_HERE")
     if request.cookie_1PSIDTS is not None:
         account.cookie_1PSIDTS = request.cookie_1PSIDTS
+    
+    # Update updated_at timestamp (keep created_at unchanged)
+    account.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    # Ensure created_at exists (for old accounts)
+    if not account.created_at:
+        account.created_at = account.updated_at
     
     account_manager.save_accounts()
     
