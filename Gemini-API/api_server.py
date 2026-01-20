@@ -64,7 +64,13 @@ CONFIG = load_config()
 print(CONFIG)
 
 # Paths
-ACCOUNTS_PATH = Path(__file__).parent / "accounts.json"
+# Use /app/data/accounts.json in container (when /app/data is mounted), 
+# otherwise use accounts.json in same directory as api_server.py
+_data_path = Path("/app/data")
+if _data_path.exists() and _data_path.is_dir():
+    ACCOUNTS_PATH = _data_path / "accounts.json"
+else:
+    ACCOUNTS_PATH = Path(__file__).parent / "accounts.json"
 
 # ============ Admin Authentication ============
 
@@ -155,12 +161,24 @@ class AccountManager:
         print(f"[API] AccountManager initialized with {len(self.accounts)} account(s)")
     
     def _load_accounts(self):
-        """Load accounts from accounts.json file."""
+        """Load accounts from accounts.json file. Auto-create file if not exists."""
         self.accounts = []
         
+        # Auto-create accounts.json if not exists
         if not self.accounts_path.exists():
-            print(f"[WARNING] accounts.json not found at {self.accounts_path}")
-            return
+            print(f"[INFO] accounts.json not found at {self.accounts_path}, creating new file...")
+            try:
+                # Create parent directory if needed
+                self.accounts_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Create default empty accounts file
+                default_data = {"accounts": []}
+                with open(self.accounts_path, "w", encoding="utf-8") as f:
+                    json.dump(default_data, f, indent=2, ensure_ascii=False)
+                print(f"[INFO] Created new accounts.json at {self.accounts_path}")
+            except Exception as e:
+                print(f"[ERROR] Failed to create accounts.json: {e}")
+                return
         
         try:
             with open(self.accounts_path, "r", encoding="utf-8") as f:
@@ -188,8 +206,11 @@ class AccountManager:
                     print(f"[API] Loaded account: {account.name}")
             
             if not self.accounts:
-                print("[WARNING] No valid accounts found in accounts.json")
+                print("[INFO] No accounts found in accounts.json. You can add accounts via /admin interface")
         
+        except json.JSONDecodeError as e:
+            print(f"[ERROR] Invalid JSON in accounts.json: {e}")
+            print("[INFO] File will be recreated on next save")
         except Exception as e:
             print(f"[ERROR] Failed to load accounts.json: {e}")
     
@@ -474,7 +495,7 @@ app.add_middleware(
 @app.get("/")
 async def root():
     return {
-        "message": "Gemini Image Generation API",
+        "message": "Gemini Image Generation APIIII",
         "endpoints": {
             "models": "GET /models",
             "generate": "POST /v1/images/generations",
@@ -958,6 +979,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "api_server:app",
         host=CONFIG.get("host", "0.0.0.0"),
-        port=CONFIG.get("port", 8000),
+        port=CONFIG.get("port", 8989),
         reload=False
     )

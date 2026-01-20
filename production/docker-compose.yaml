@@ -20,7 +20,7 @@ services:
     ports:
       - "8989:8989"
     volumes:
-      - ./accounts.json:/app/accounts.json
+      - ./data:/app/data
     env_file:
       - .env
     networks:
