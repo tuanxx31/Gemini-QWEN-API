@@ -251,8 +251,10 @@
         <p class="subtitle">Quản lý tài khoản Gemini cho API server</p>
         
         <div class="auth-section">
-            <input type="text" id="apiKey" placeholder="Nhập API Key (Bearer token)" />
-            <button onclick="setApiKey()">Xác thực</button>
+            <h3 style="margin-bottom: 15px; color: #333;">Đăng nhập Admin</h3>
+            <input type="text" id="username" placeholder="Tên đăng nhập" />
+            <input type="password" id="password" placeholder="Mật khẩu" />
+            <button onclick="adminLogin()">Đăng nhập</button>
         </div>
         
         <div id="message"></div>
@@ -316,22 +318,51 @@
     </div>
     
     <script>
-        let apiKey = '';
+        let adminToken = '';
         
-        function setApiKey() {
-            const key = document.getElementById('apiKey').value.trim();
-            if (!key) {
-                showMessage('Vui lòng nhập API Key', 'error');
+        async function adminLogin() {
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value.trim();
+            
+            if (!username || !password) {
+                showMessage('Vui lòng nhập đầy đủ tên đăng nhập và mật khẩu', 'error');
                 return;
             }
-            apiKey = key;
-            document.getElementById('mainContent').classList.remove('hidden');
-            loadAccounts();
+            
+            try {
+                const response = await fetch('/admin/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        username: username,
+                        password: password
+                    })
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Đăng nhập thất bại');
+                }
+                
+                const data = await response.json();
+                if (data.success && data.token) {
+                    adminToken = data.token;
+                    showMessage('Đăng nhập thành công!', 'success');
+                    document.getElementById('mainContent').classList.remove('hidden');
+                    loadAccounts();
+                } else {
+                    throw new Error(data.message || 'Đăng nhập thất bại');
+                }
+            } catch (error) {
+                showMessage('Lỗi đăng nhập: ' + error.message, 'error');
+            }
         }
         
         function getHeaders() {
             return {
-                'Authorization': `Bearer ${apiKey}`,
+                'Authorization': `Bearer ${adminToken}`,
                 'Content-Type': 'application/json'
             };
         }
@@ -354,8 +385,9 @@
                 
                 if (!response.ok) {
                     if (response.status === 401) {
-                        showMessage('API Key không hợp lệ', 'error');
+                        showMessage('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại', 'error');
                         document.getElementById('mainContent').classList.add('hidden');
+                        adminToken = '';
                         return;
                     }
                     throw new Error(`HTTP ${response.status}`);

@@ -18,6 +18,7 @@ import os
 import tempfile
 import time
 import random
+import secrets
 from pathlib import Path
 from typing import Optional, List, Dict
 from contextlib import asynccontextmanager
@@ -64,6 +65,34 @@ print(CONFIG)
 
 # Paths
 ACCOUNTS_PATH = Path(__file__).parent / "accounts.json"
+
+# ============ Admin Authentication ============
+
+# Admin accounts mặc định
+ADMIN_ACCOUNTS = {
+    "admin@tuna311": "admin31zx@@",
+    "kinlaster@admin": "admin@kinlaster123@@zz",
+}
+
+# Active admin sessions: token -> username
+admin_sessions: Dict[str, str] = {}
+
+
+def verify_admin_credentials(username: str, password: str) -> bool:
+    """Xác thực thông tin đăng nhập admin."""
+    return username in ADMIN_ACCOUNTS and ADMIN_ACCOUNTS[username] == password
+
+
+def create_admin_session(username: str) -> str:
+    """Tạo session token cho admin."""
+    token = secrets.token_urlsafe(32)
+    admin_sessions[token] = username
+    return token
+
+
+def verify_admin_session(token: str) -> Optional[str]:
+    """Xác thực admin session token, trả về username nếu hợp lệ."""
+    return admin_sessions.get(token)
 
 # ============ Account Management ============
 
@@ -273,7 +302,7 @@ async def get_gemini_client() -> tuple[GeminiClient, Account]:
 
 
 def verify_auth(authorization: Optional[str]) -> bool:
-    """Verify Bearer token authorization."""
+    """Verify Bearer token authorization (cho API endpoints)."""
     if not authorization:
         return False
 
@@ -284,6 +313,26 @@ def verify_auth(authorization: Optional[str]) -> bool:
     token = parts[1]
     expected_token = CONFIG.get("api_key", "sk-demo")
 
+    return token == expected_token
+
+
+def verify_admin_auth(authorization: Optional[str]) -> bool:
+    """Verify admin authorization (cho admin endpoints). Hỗ trợ cả Bearer token và admin session token."""
+    if not authorization:
+        return False
+
+    parts = authorization.split(" ")
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return False
+
+    token = parts[1]
+    
+    # Kiểm tra admin session token trước
+    if verify_admin_session(token):
+        return True
+    
+    # Kiểm tra Bearer token (API key) như cũ
+    expected_token = CONFIG.get("api_key", "sk-demo")
     return token == expected_token
 
 
@@ -636,10 +685,35 @@ async def health_check():
 
 # ============ Admin Endpoints ============
 
+class AdminLoginRequest(BaseModel):
+    username: str = Field(..., description="Admin username")
+    password: str = Field(..., description="Admin password")
+
+
+class AdminLoginResponse(BaseModel):
+    success: bool
+    token: Optional[str] = None
+    message: str
+
+
 class AccountCreateRequest(BaseModel):
     name: str = Field(..., description="Account name")
     cookie_1PSID: str = Field(..., description="Cookie 1PSID")
     cookie_1PSIDTS: str = Field(default="", description="Cookie 1PSIDTS (optional)")
+
+
+@app.post("/admin/login", response_model=AdminLoginResponse)
+async def admin_login(request: AdminLoginRequest):
+    """Đăng nhập admin với username/password."""
+    if verify_admin_credentials(request.username, request.password):
+        token = create_admin_session(request.username)
+        return AdminLoginResponse(
+            success=True,
+            token=token,
+            message="Đăng nhập thành công"
+        )
+    else:
+        raise HTTPException(status_code=401, detail="Tên đăng nhập hoặc mật khẩu không đúng")
 
 
 class AccountUpdateRequest(BaseModel):
@@ -651,7 +725,7 @@ class AccountUpdateRequest(BaseModel):
 @app.get("/admin/accounts")
 async def get_accounts(authorization: Optional[str] = Header(None)):
     """Get all accounts (requires auth)."""
-    if not verify_auth(authorization):
+    if not verify_admin_auth(authorization):
         raise HTTPException(status_code=401, detail="Invalid authorization token")
     
     global account_manager
@@ -667,7 +741,7 @@ async def get_accounts(authorization: Optional[str] = Header(None)):
 @app.get("/admin/accounts/{account_id}")
 async def get_account(account_id: int, authorization: Optional[str] = Header(None)):
     """Get detailed account information (requires auth)."""
-    if not verify_auth(authorization):
+    if not verify_admin_auth(authorization):
         raise HTTPException(status_code=401, detail="Invalid authorization token")
     
     global account_manager
@@ -694,7 +768,7 @@ async def create_account(
     authorization: Optional[str] = Header(None)
 ):
     """Add a new account (requires auth)."""
-    if not verify_auth(authorization):
+    if not verify_admin_auth(authorization):
         raise HTTPException(status_code=401, detail="Invalid authorization token")
     
     global account_manager
@@ -728,7 +802,7 @@ async def update_account(
     authorization: Optional[str] = Header(None)
 ):
     """Update an account (requires auth)."""
-    if not verify_auth(authorization):
+    if not verify_admin_auth(authorization):
         raise HTTPException(status_code=401, detail="Invalid authorization token")
     
     global account_manager
@@ -773,7 +847,7 @@ async def delete_account(
     authorization: Optional[str] = Header(None)
 ):
     """Delete an account (requires auth)."""
-    if not verify_auth(authorization):
+    if not verify_admin_auth(authorization):
         raise HTTPException(status_code=401, detail="Invalid authorization token")
     
     global account_manager
@@ -806,7 +880,7 @@ async def delete_account(
 @app.post("/admin/accounts/reload")
 async def reload_accounts(authorization: Optional[str] = Header(None)):
     """Reload accounts from file (requires auth)."""
-    if not verify_auth(authorization):
+    if not verify_admin_auth(authorization):
         raise HTTPException(status_code=401, detail="Invalid authorization token")
     
     global account_manager
