@@ -19,6 +19,8 @@ services:
     restart: unless-stopped
     ports:
       - "8989:8989"
+    volumes:
+      - ./accounts.json:/app/accounts.json
     env_file:
       - .env
     networks:
