@@ -9,3 +9,8 @@ services:
       context: ../Gemini-API
       dockerfile: Dockerfile
     image: registry.gitlab.com/tuanxx31/gemini-qwen-api/gemini-api:latest
+  seedream-api:
+    build:
+      context: ../SEEDREAM-API
+      dockerfile: Dockerfile
+    image: registry.gitlab.com/tuanxx31/gemini-qwen-api/seedream-api:latest
