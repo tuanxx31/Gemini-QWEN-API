@@ -6,11 +6,25 @@ services:
     ports:
       - "8990:8990"
     volumes:
-      - ./config.json:/app/config.json:ro
+      - ./config-qwen.json:/app/config.json:ro
     networks:
       shared-network:
         aliases:
           - qwen-api
+    environment:
+      - PYTHONUNBUFFERED=1
+  seedream-api:
+    image: registry.gitlab.com/tuanxx31/gemini-qwen-api/seedream-api:latest
+    container_name: seedream-api
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./config-seedream.json:/app/config.json:ro
+    networks:
+      shared-network:
+        aliases:
+          - seedream-api
     environment:
       - PYTHONUNBUFFERED=1
   gemini-api:

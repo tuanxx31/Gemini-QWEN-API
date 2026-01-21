@@ -7,9 +7,6 @@ services:
     restart: always
     ports:
       - "80:80"
-    depends_on:
-      - qwen-api
-      - gemini-api
     networks:
       - shared-network
     volumes:

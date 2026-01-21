@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+aiohttp
+pydantic
+yarl
+python-dotenv
+loguru
+tk
