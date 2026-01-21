@@ -18,5 +18,5 @@ COPY . .
 EXPOSE 8002
 
 # Run the API server
-CMD ["python", "api_server.py"]
+CMD ["python", "SEEDREAM-API.py"]
 
