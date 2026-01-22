@@ -6,3 +6,4 @@ yarl
 python-dotenv
 loguru
 tk
+python-multipart

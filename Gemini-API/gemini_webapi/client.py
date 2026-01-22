@@ -233,6 +233,14 @@ class GeminiClient(GemMixin):
                 logger.debug("Cookies refreshed. New __Secure-1PSIDTS applied.")
 
             await asyncio.sleep(self.refresh_interval)
+    async def _upload_with_log(self, file):
+        from .utils import upload_file
+        import time
+        print(f"[Gemini] Uploading file: {file}")
+        start = time.time()
+        result = await upload_file(file, self.proxy)
+        print(f"[Gemini] Upload completed in {time.time() - start:.2f}s")
+        return result
 
     @running(retry=2)
     async def generate_content(
@@ -352,7 +360,7 @@ class GeminiClient(GemMixin):
                     None,
                     [
                         [
-                            [await upload_file(file, self.proxy)],
+                            [await self._upload_with_log(file)],
                             parse_file_name(file),
                         ]
                         for file in files
@@ -546,6 +554,53 @@ class GeminiClient(GemMixin):
                 candidate_list: list[Any] = get_nested_value(body, [4], [])
                 output_candidates: list[Candidate] = []
 
+                # Deep scan for all generated images in the entire response
+                all_discovered_images = []
+                def deep_scan_for_images(data, depth=0):
+                    if depth > 30: return []
+                    found = []
+                    
+                    if isinstance(data, list):
+                        # Pattern matching for image data: [null, 1, "filename.png", "url", ...]
+                        if len(data) >= 4 and data[1] == 1 and isinstance(data[3], str) and data[3].startswith("http"):
+                            u = data[3]
+                            if "gg-dl" in u or "googleusercontent" in u:
+                                found.append({
+                                    "url": u,
+                                    "filename": data[2] if isinstance(data[2], str) else "",
+                                    "is_watermarked": "watermark" in u.lower() or "scale" not in u.lower()
+                                })
+                        
+                        # Recurse into list items
+                        for item in data:
+                            found.extend(deep_scan_for_images(item, depth + 1))
+                            
+                    elif isinstance(data, dict):
+                        # Recurse into dictionary values
+                        for val in data.values():
+                            found.extend(deep_scan_for_images(val, depth + 1))
+                            
+                    elif isinstance(data, str) and len(data) > 10:
+                        # CRITICAL: Try to parse strings that look like nested JSON
+                        if (data.startswith("[") and data.endswith("]")) or (data.startswith("{") and data.endswith("}")):
+                            try:
+                                nested_data = json.loads(data)
+                                found.extend(deep_scan_for_images(nested_data, depth + 1))
+                            except:
+                                pass
+                                
+                    return found
+
+                raw_found = deep_scan_for_images(response_json)
+                unique_urls = set()
+                for img_info in raw_found:
+                    if img_info["url"] not in unique_urls:
+                        unique_urls.add(img_info["url"])
+                        all_discovered_images.append(img_info)
+                
+                if debug_mode:
+                    logger.debug(f"Global deep scan found {len(all_discovered_images)} unique image URLs")
+
                 for candidate_index, candidate in enumerate(candidate_list):
                     rcid = get_nested_value(candidate, [0])
                     if not rcid:
@@ -579,209 +634,79 @@ class GeminiClient(GemMixin):
                     # Generated images
                     generated_images = []
                     
-                    # Check if this is an image generation response
-                    # candidate[12][6] indicates image mode status:
-                    #   [0] = still generating, [2] or [3] = complete with images
-                    # We need to find the LAST chunk with complete images, not the first
+                    # 1. Try legacy detection logic (for backward compatibility)
                     candidate_12 = get_nested_value(candidate, [12])
                     is_image_mode = (
                         isinstance(candidate_12, list) and 
-                        len(candidate_12) > 6 and 
-                        isinstance(candidate_12[6], list) and
-                        len(candidate_12[6]) > 0
+                        (len(candidate_12) > 6 or (len(candidate_12) > 0 and isinstance(candidate_12[0], dict) and "46" in candidate_12[0]))
                     )
                     
                     if is_image_mode:
-                        img_mode_status = candidate_12[6][0] if candidate_12[6] else None
-                        if debug_mode:
-                            logger.debug(f"Image mode detected (candidate[12][6] = {candidate_12[6]}), status={img_mode_status}")
-                        
-                        # Search through ALL response parts and keep the LAST one with complete images
-                        # Complete = [12][6][0] >= 2 (not 0 which means still generating)
+                        # Find the last part with status >= 2 or with image data
                         img_body = None
                         best_status = -1
                         
                         for img_part_index, part in enumerate(response_json):
                             try:
                                 img_part_body = get_nested_value(part, [2])
-                                if not img_part_body:
-                                    continue
-
+                                if not img_part_body: continue
                                 img_part_json = json.loads(img_part_body)
-                                
-                                # Check the status of this part's [12][6] 
                                 part_candidate = get_nested_value(img_part_json, [4, candidate_index])
                                 part_status_arr = get_nested_value(part_candidate, [12, 6])
                                 part_status = part_status_arr[0] if isinstance(part_status_arr, list) and part_status_arr else -1
                                 
-                                # We want the part with highest status (2 or 3 = complete)
-                                # Also check if it has actual image data
                                 if isinstance(part_status, int) and part_status >= best_status:
-                                    # Check for image data at [12][6][1] (image-to-image) or [12][7][0] (text-to-image)
-                                    has_img_data = (
-                                        get_nested_value(part_candidate, [12, 6, 1]) or
-                                        get_nested_value(part_candidate, [12, 7, 0])
-                                    )
+                                    has_img_data = (get_nested_value(part_candidate, [12, 6, 1]) or 
+                                                  get_nested_value(part_candidate, [12, 7, 0]) or
+                                                  "46" in str(get_nested_value(part_candidate, [12, 0])))
                                     if has_img_data or part_status > best_status:
                                         best_status = part_status
                                         img_body = img_part_json
-                                        if debug_mode:
-                                            logger.debug(f"Found better response part {img_part_index} with status={part_status}")
-                            except json.JSONDecodeError:
-                                continue
+                            except: continue
                         
-                        if debug_mode:
-                            logger.debug(f"Selected response part with status={best_status}")
-
                         if img_body:
-                            img_candidate = get_nested_value(
-                                img_body, [4, candidate_index], []
-                            )
-
-                            if finished_text := get_nested_value(
-                                img_candidate, [1, 0]
-                            ):  # Only overwrite if new text is returned after image generation
-                                text = re.sub(
-                                    r"http://googleusercontent\.com/image_generation_content/\d+",
-                                    "",
-                                    finished_text,
-                                ).rstrip()
-
-                            for img_index, gen_img_data in enumerate(
-                                get_nested_value(img_candidate, [12, 7, 0], [])
-                            ):
-                                # Debug: Log the structure of gen_img_data to understand image locations
-                                if debug_mode:
-                                    logger.debug(f"gen_img_data[{img_index}] type: {type(gen_img_data)}, len: {len(gen_img_data) if isinstance(gen_img_data, list) else 'N/A'}")
-                                    if isinstance(gen_img_data, list):
-                                        for i, item in enumerate(gen_img_data[:5]):  # Log first 5 elements
-                                            if item is not None:
-                                                logger.debug(f"  gen_img_data[{img_index}][{i}] = {str(item)[:150]}")
-                                
-                                # Images can be at multiple paths within each gen_img_data:
-                                # - First image: [0][3][3] → gen_img_data[0][3] is first image data
-                                # - Second image: [0][6][3] → gen_img_data[0][6] is second image data (at index 6!)
-                                # The structure is: [[null,null,null,[img1],null,null,[img2],...],...]
-                                
-                                image_paths = [
-                                    [0, 3, 3],    # First image: gen_img_data[0][3][3]
-                                    [0, 6, 3],    # Second image: gen_img_data[0][6][3] (index 6!)
-                                    [0, 0, 3, 3], # Alternative nested path
-                                    [0, 0, 6, 3], # Alternative for second image
-                                ]
-                                
-
-                                for path in image_paths:
-                                    url = get_nested_value(gen_img_data, path)
-                                    if debug_mode:
-                                        logger.debug(f"  Path {path} -> {str(url)[:100] if url else 'None'}")
-                                    if url and isinstance(url, str) and url.startswith("http"):
-                                        # Check if we already added this URL (avoid duplicates)
-                                        if any(img.url == url for img in generated_images):
-                                            if debug_mode:
-                                                logger.debug(f"    Skipping duplicate URL")
-                                            continue
-                                        
-                                        # Get filename from the same path but at index 2 instead of 3
-                                        # Structure: [None, 1, 'filename.png', 'url', ...]
-                                        filename_path = path[:-1] + [2]  # Replace last index (3) with 2
-                                        filename = get_nested_value(gen_img_data, filename_path, "")
-                                        
-                                        # Determine watermark status by path index:
-                                        # - Index 3 paths = watermarked (first image)
-                                        # - Index 6 paths = no watermark (second image)
-                                        path_index = path[1] if len(path) > 1 else path[-2] if len(path) > 2 else 3
-                                        is_watermarked = path_index == 3 or path_index == 0  # 0, 3 = watermark; 6 = no watermark
-                                        watermark_tag = "[WATERMARK]" if is_watermarked else "[NO_WATERMARK]"
-                                        
-                                        if debug_mode:
-                                            logger.debug(f"    Filename: {filename}, Path index: {path_index}, Watermark: {is_watermarked}")
-                                        
-                                        # Title includes watermark tag for filtering
-                                        img_num = len(generated_images) + 1
-                                        title = f"{watermark_tag} {filename}" if filename else f"{watermark_tag} Image {img_num}"
-
-                                        alt_list = (
-                                            get_nested_value(gen_img_data, [3, 5], []) or
-                                            get_nested_value(gen_img_data, [0, 3, 5], [])
-                                        )
-                                        alt = (
-                                            get_nested_value(alt_list, [img_index])
-                                            or get_nested_value(alt_list, [0])
-                                            or ""
-                                        )
-
-                                        generated_images.append(
-                                            GeneratedImage(
-                                                url=url,
-                                                title=title,
-                                                alt=alt,
-                                                proxy=self.proxy,
-                                                cookies=self.cookies,
-                                            )
-                                        )
-
-                                
-                            if debug_mode:
-                                logger.debug(f"Extracted {len(generated_images)} generated images from standard path")
+                            target_candidate = get_nested_value(img_body, [4, candidate_index], [])
+                            if finished_text := get_nested_value(target_candidate, [1, 0]):
+                                text = re.sub(r"http://googleusercontent\.com/image_generation_content/\d+", "", finished_text).rstrip()
                             
-                            # Fallback: If no images found via standard paths, search in candidate[12][6]
-                            # Image-to-image responses have images at [12][6][1][0][0][0][3] (PNG) and [12][6][1][0][0][3] (JPEG)
-                            if not generated_images and img_candidate:
-                                if debug_mode:
-                                    logger.debug("No images from standard path, searching image-to-image path in candidate[12][6]...")
-                                
-                                # Image-to-image structure: candidate[12][6] = [2, [[[[null,null,null,PNG],null,null,JPEG]...]]]
-                                img_edit_data = get_nested_value(img_candidate, [12, 6], None)
-                                if img_edit_data and isinstance(img_edit_data, list) and len(img_edit_data) > 1:
-                                    # Path to images: [12][6][1][0][0][0] contains the image array
-                                    img_array = get_nested_value(img_edit_data, [1, 0, 0, 0], None)
+                            # Use global scan results for this candidate
+                            for img_data in all_discovered_images:
+                                # CRITICAL: Filter out original uploaded images if they are in the list
+                                # Original assets in Image Editing usually have /gg/ but NOT /gg-dl/
+                                if "/gg/" in img_data["url"] and "/gg-dl/" not in img_data["url"]:
+                                    if debug_mode: logger.debug(f"Filtering out original asset: {img_data['url']}")
+                                    continue
                                     
-                                    if img_array and isinstance(img_array, list):
-                                        if debug_mode:
-                                            logger.debug(f"Found image array at [12][6][1][0][0][0], len: {len(img_array)}")
-                                        
-                                        # PNG is at position 3: [null, null, null, [null,1,"file.png","url",...]]
-                                        png_data = get_nested_value(img_array, [3], None)
-                                        if png_data and isinstance(png_data, list) and len(png_data) > 3:
-                                            url = png_data[3] if len(png_data) > 3 else None
-                                            filename = png_data[2] if len(png_data) > 2 else ""
-                                            if url and isinstance(url, str) and url.startswith("http") and "gg-dl" in url:
-                                                if debug_mode:
-                                                    logger.debug(f"Found PNG at [12][6][1][0][0][0][3]: {url[:80]}...")
-                                                generated_images.append(
-                                                    GeneratedImage(
-                                                        url=url,
-                                                        title=f"[WATERMARK] {filename}" if filename else "[WATERMARK] Image",
-                                                        alt="",
-                                                        proxy=self.proxy,
-                                                        cookies=self.cookies,
-                                                    )
-                                                )
-                                        
-                                        # JPEG is at parent level position 3: get_nested_value([12][6][1][0][0], [3])
-                                        jpeg_container = get_nested_value(img_edit_data, [1, 0, 0, 3], None)
-                                        if jpeg_container and isinstance(jpeg_container, list) and len(jpeg_container) > 3:
-                                            url = jpeg_container[3] if len(jpeg_container) > 3 else None
-                                            filename = jpeg_container[2] if len(jpeg_container) > 2 else ""
-                                            if url and isinstance(url, str) and url.startswith("http") and "gg-dl" in url:
-                                                if debug_mode:
-                                                    logger.debug(f"Found JPEG at [12][6][1][0][0][3]: {url[:80]}...")
-                                                generated_images.append(
-                                                    GeneratedImage(
-                                                        url=url,
-                                                        title=f"[NO_WATERMARK] {filename}" if filename else "[NO_WATERMARK] Image",
-                                                        alt="",
-                                                        proxy=self.proxy,
-                                                        cookies=self.cookies,
-                                                    )
-                                                )
+                                tag = "[WATERMARK]" if img_data["is_watermarked"] else "[NO_WATERMARK]"
+                                filename = img_data["filename"]
+                                generated_images.append(
+                                    GeneratedImage(
+                                        url=img_data["url"],
+                                        title=f"{tag} {filename}" if filename else f"{tag} Image {len(generated_images)+1}",
+                                        alt="",
+                                        proxy=self.proxy,
+                                        cookies=self.cookies,
+                                    )
+                                )
+                    
+                    # 2. Fallback: if text mentions image generation but no images found, use global scan
+                    if not generated_images and ("http://googleusercontent.com/image_generation_content" in text or is_image_mode):
+                        for img_data in all_discovered_images:
+                            # Filter originals in fallback as well
+                            if "/gg/" in img_data["url"] and "/gg-dl/" not in img_data["url"]:
+                                continue
                                 
-                                if debug_mode:
-                                    logger.debug(f"Total extracted after image-to-image path: {len(generated_images)} images")
-                        else:
-                            if debug_mode:
-                                logger.debug("Image mode detected but no image data found in any response part")
+                            tag = "[WATERMARK]" if img_data["is_watermarked"] else "[NO_WATERMARK]"
+                            generated_images.append(
+                                GeneratedImage(
+                                    url=img_data["url"],
+                                    title=f"{tag} {img_data['filename']}" if img_data['filename'] else f"{tag} Image {len(generated_images)+1}",
+                                    alt="",
+                                    proxy=self.proxy,
+                                    cookies=self.cookies,
+                                )
+                            )
+                    
 
                     output_candidates.append(
                         Candidate(

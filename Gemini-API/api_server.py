@@ -604,7 +604,8 @@ async def generate_image(
             prompt=full_prompt,
             model=request.model,
             image_mode=True,
-            timeout=CONFIG.get("timeout", 120)
+            timeout=CONFIG.get("timeout", 120),
+            debug_mode=True
         )
 
         if not response.images:
@@ -656,6 +657,7 @@ async def edit_image(
     model: str = Form(default="gemini-2.5-flash"),
     n: int = Form(default=1, ge=1, le=4),
     size: Optional[str] = Form(default=None),
+    response_format: str = Form(default="b64_json", description="Response format: b64_json or url"),
     authorization: Optional[str] = Header(None)
 ):
     """
@@ -686,13 +688,17 @@ async def edit_image(
         print(f"[API] [{account.name}] Editing image with prompt: {full_prompt[:100]}...")
 
         # Call Gemini API with image
+        start_time = time.time()
+        print(f"[API] [{account.name}] Start calling Gemini API...")
         response = await client.generate_content(
             prompt=full_prompt,
             files=[temp_path],
             model=model,
             image_mode=True,
-            timeout=CONFIG.get("timeout", 120)
+            timeout=CONFIG.get("timeout", 120),
+            debug_mode=True
         )
+        print(f"[API] [{account.name}] Gemini API responded in {time.time() - start_time:.2f}s")
 
         if not response.images:
             raise HTTPException(
@@ -705,21 +711,32 @@ async def edit_image(
 
         # Download and convert images to base64
         image_data_list = []
-        images_to_process = response.images[:n]
+        # Always choose the first image as requested by user (best quality)
+        images_to_process = response.images[:1]
 
-        for img in images_to_process:
+        for idx, img in enumerate(images_to_process):
             try:
+                print(f"[API] [{account.name}] Downloading result image {idx+1}/{len(images_to_process)}...")
+                dl_start = time.time()
                 b64_string, url = await download_image_as_base64(img, client.cookies)
+                print(f"[API] [{account.name}] Image {idx+1} downloaded in {time.time() - dl_start:.2f}s")
                 image_data_list.append(ImageData(
-                    b64_json=b64_string,
+                    b64_json=b64_string if response_format == "b64_json" else None,
+                    url=url if response_format == "url" else None,
                     revised_prompt=revised_prompt
                 ))
             except Exception as e:
-                print(f"[API] Error downloading image: {e}")
+                print(f"[API] Error downloading image {idx+1}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
 
         if not image_data_list:
-            raise HTTPException(status_code=500, detail="Failed to download generated images")
+            # Check if any image was found at all
+            if not response.images:
+                raise HTTPException(status_code=500, detail=f"Gemini did not return any images. Text: {response.text[:100]}")
+            else:
+                raise HTTPException(status_code=500, detail=f"Failed to download/process {len(response.images)} images returned by Gemini.")
 
         print(f"[API] [{account.name}] Successfully edited image, got {len(image_data_list)} result(s)")
 

@@ -172,8 +172,8 @@ class GeneratedImage(Image):
             Absolute path of the saved image if successfully saved.
         """
 
-        if full_size:
-            self.url += "=s2048"
+        if full_size and "=s" not in self.url:
+            self.url += "=s4096"
 
         return await super().save(
             path=path,
