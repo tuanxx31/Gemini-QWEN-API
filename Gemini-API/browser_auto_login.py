@@ -287,7 +287,7 @@ async def main():
         print(f"[START] Xu ly tai khoan: {email}")
         print(f"{'='*50}")
         
-        result = await auto_login(email, password, totp_secret, headless=args.headless, fresh=args.fresh)
+        result = await auto_login(email, password, totp_secret, headless=True, fresh=args.fresh)
         
         if result:
             print(f"[OK] Hoan tat cho {email}!")
