@@ -43,6 +43,15 @@ class Headers(Enum):
     }
     ROTATE_COOKIES = {
         "Content-Type": "application/json",
+        "Accept": "*/*",
+        "Accept-Language": "vi,en-US;q=0.9,en;q=0.8,tr;q=0.7,zh-CN;q=0.6,zh;q=0.5",
+        "Origin": "https://accounts.google.com",
+        "Referer": "https://accounts.google.com/RotateCookiesPage?og_pid=658&rot=3&origin=https%3A%2F%2Fgemini.google.com&exp_id=0",
+        "X-Same-Domain": "1",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 OPR/126.0.0.0",
+        "sec-ch-ua": '"Chromium";v="142", "Opera";v="126", "Not_A Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
     }
     UPLOAD = {"Push-ID": "feeds/mcudyrk2a4khkz"}
     IMAGE_MODE = {

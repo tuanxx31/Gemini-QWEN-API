@@ -2,7 +2,7 @@ import requests
 import json
 import os
 
-API_URL = "http://localhost:8000/v1/images/edits"
+API_URL = "http://192.168.88.180:8000/v1/images/edits"
 API_KEY = "sk-demo"
 
 def test_edit_image():

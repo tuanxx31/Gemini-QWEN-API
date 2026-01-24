@@ -7,7 +7,7 @@ services:
   gemini-api:
     build:
       context: ../Gemini-API
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile_new
     image: registry.gitlab.com/tuanxx31/gemini-qwen-api/gemini-api:latest
   seedream-api:
     build:

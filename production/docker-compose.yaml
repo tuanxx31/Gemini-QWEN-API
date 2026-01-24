@@ -52,3 +52,7 @@ services:
 networks:
   shared-network:
     external: true
+
+
+volumes:
+  - ./data:/app/data

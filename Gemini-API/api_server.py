@@ -20,9 +20,9 @@ import time
 import random
 import secrets
 from pathlib import Path
-from typing import Optional, List, Dict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Header, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,8 +31,20 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 import uvicorn
 
-# Import Gemini client
+# Import Gemini client and utilities
 from gemini_webapi import GeminiClient
+from gemini_webapi.utils import rotate_1psidts
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(message)s'
+)
+# Silence verbose libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("gemini_webapi").setLevel(logging.INFO)
 
 # Load config
 # CONFIG_PATH = Path(__file__).parent / "config.json"
@@ -66,9 +78,13 @@ print(CONFIG)
 # Paths
 # Use /app/data/accounts.json in container (when /app/data is mounted), 
 # otherwise use accounts.json in same directory as api_server.py
-_data_path = Path("/app/data")
-if _data_path.exists() and _data_path.is_dir():
-    ACCOUNTS_PATH = _data_path / "accounts.json"
+_app_data = Path("/app/data")
+_local_data = Path(__file__).parent / "data"
+
+if _app_data.exists() and _app_data.is_dir():
+    ACCOUNTS_PATH = _app_data / "accounts.json"
+elif _local_data.exists() and _local_data.is_dir():
+    ACCOUNTS_PATH = _local_data / "accounts.json"
 else:
     ACCOUNTS_PATH = Path(__file__).parent / "accounts.json"
 
@@ -141,6 +157,8 @@ class Account:
     cookie_1PSIDTS: str = ""
     client: Optional[GeminiClient] = None
     is_active: bool = True
+    is_dead: bool = False
+    status_message: str = "Chưa kiểm tra"
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -158,7 +176,7 @@ class AccountManager:
         self.accounts: List[Account] = []
         self.current_index = 0
         self._load_accounts()
-        print(f"[API] AccountManager initialized with {len(self.accounts)} account(s)")
+        print(f"🔋 Manager: {len(self.accounts)} account(s)")
     
     def _load_accounts(self):
         """Load accounts from accounts.json file. Auto-create file if not exists."""
@@ -203,7 +221,7 @@ class AccountManager:
                 )
                 if account.cookie_1PSID:
                     self.accounts.append(account)
-                    print(f"[API] Loaded account: {account.name}")
+                    print(f"📦 Loaded: {account.name}")
             
             if not self.accounts:
                 print("[INFO] No accounts found in accounts.json. You can add accounts via /admin interface")
@@ -227,22 +245,232 @@ class AccountManager:
         self.current_index = (self.current_index + 1) % len(self.accounts)
         
         # Initialize client if needed
+        # Initialize client if needed
         if account.client is None or not account.client._running:
-            print(f"[API] Initializing client for account: {account.name}")
-            
             account.client = GeminiClient(
                 secure_1psid=account.cookie_1PSID,
                 secure_1psidts=account.cookie_1PSIDTS if account.cookie_1PSIDTS and account.cookie_1PSIDTS != "YOUR_SECURE_1PSIDTS_HERE" else None
             )
-            
             await account.client.init(
                 timeout=self.timeout,
                 auto_close=False,
                 auto_refresh=True
             )
-            print(f"[API] Client initialized for account: {account.name}")
+            account.is_dead = False
+            account.status_message = "Đang hoạt động"
+            print(f"✅ Linked: {account.name}")
         
         return account.client, account
+
+    async def initialize_account(self, account: Account):
+        """Khởi tạo một tài khoản cụ thể với cơ chế tự phục hồi cookie TS."""
+        if account.client is None or not account.client._running:
+            try:
+                # Thử lần 1: Dùng cả 2 cookie hiện có
+                account.client = GeminiClient(
+                    secure_1psid=account.cookie_1PSID,
+                    secure_1psidts=account.cookie_1PSIDTS if account.cookie_1PSIDTS and account.cookie_1PSIDTS != "YOUR_SECURE_1PSIDTS_HERE" else None
+                )
+                await account.client.init(timeout=self.timeout, auto_close=False, auto_refresh=True)
+                account.is_dead = False
+                account.status_message = "Đang hoạt động"
+                print(f"✅ [{account.name}] Auto-init success")
+            except Exception as e:
+                # Thử lần 2: Nếu lỗi, dùng rotate_1psidts để xin mã mới trực tiếp từ SID
+                print(f"🔄 [{account.name}] Cookie TS may be expired ({e}), attempting manual rotate...")
+                try:
+                    # Tạo dictionary cookie cho hàm rotate
+                    manual_cookies = {"__Secure-1PSID": account.cookie_1PSID}
+                    if account.cookie_1PSIDTS:
+                        manual_cookies["__Secure-1PSIDTS"] = account.cookie_1PSIDTS
+
+                    new_psidts = await rotate_1psidts(manual_cookies)
+                    
+                    if new_psidts:
+                        print(f"✨ [{account.name}] Manual rotate success! New TS obtained.")
+                        account.cookie_1PSIDTS = new_psidts
+                        account.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+                        
+                        # Thử khởi tạo lại với mã mới
+                        account.client = GeminiClient(
+                            secure_1psid=account.cookie_1PSID,
+                            secure_1psidts=new_psidts
+                        )
+                        await account.client.init(timeout=self.timeout, auto_close=False, auto_refresh=True)
+                        
+                        account.is_dead = False
+                        account.status_message = "Đã tự phục hồi (Auto-Rotate)"
+                        self.save_accounts() # Lưu ngay để lần sau không bị lỗi nữa
+                        print(f"✅ [{account.name}] Auto-recovery success")
+                        return
+                    else:
+                        raise Exception("Google didn't return a new cookie during manual rotate")
+                        
+                except Exception as e2:
+                    # Thử lần 3: Nếu rotate thất bại, dùng Browser Auto-Login để lấy cookie mới
+                    print(f"🔄 [{account.name}] Standard rotate failed, attempting Browser Automation recovery...")
+                    browser_success = await self.run_browser_auto_login(account.name)
+                    if browser_success:
+                        # Sau khi browser login thành công, thử khởi tạo lại 1 lần cuối
+                        # Ta reload lại dnah sách account nội bộ
+                        for acc_data in self.accounts:
+                            if acc_data.name == account.name:
+                                try:
+                                    account.cookie_1PSID = acc_data.cookie_1PSID
+                                    account.cookie_1PSIDTS = acc_data.cookie_1PSIDTS
+                                    account.client = GeminiClient(secure_1psid=account.cookie_1PSID, secure_1psidts=account.cookie_1PSIDTS)
+                                    await account.client.init(timeout=self.timeout, auto_close=False, auto_refresh=True)
+                                    account.is_dead = False
+                                    account.status_message = "Đã phục hồi qua Browser Automation"
+                                    print(f"✅ [{account.name}] Browser recovery successful")
+                                    return
+                                except Exception as e3:
+                                    print(f"❌ [{account.name}] Final init failed after browser login: {e3}")
+                    
+                    account.is_dead = True
+                    account.status_message = f"Khởi tạo lỗi (Hết hạn): {str(e2)}"
+                    print(f"❌ [{account.name}] Auto-recovery failed: {e2}")
+
+    async def initialize_all(self):
+        """Khởi tạo song song tất cả các tài khoản đang active."""
+        if not self.accounts:
+            return
+        
+        print(f"[API] Starting auto-initialization for {len(self.accounts)} account(s)...")
+        tasks = [self.initialize_account(acc) for acc in self.accounts if acc.is_active]
+        if tasks:
+            await asyncio.gather(*tasks)
+        print("[API] All accounts initialization finished")
+
+    async def sync_with_clients(self):
+        """Duyệt qua các client đang chạy, cập nhật cookie mới và lưu vào file nếu có thay đổi."""
+        changed = False
+        for account in self.accounts:
+            if account.client and account.client._running:
+                # 1. Kiểm tra cookie rotate (PSIDTS)
+                new_psidts = account.client.cookies.get("__Secure-1PSIDTS")
+                if new_psidts and new_psidts != account.cookie_1PSIDTS:
+                    print(f"🔄 [Sync] {account.name} - New Cookie! Saving...")
+                    account.cookie_1PSIDTS = new_psidts
+                    account.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+                    changed = True
+                
+                # 2. Kiểm tra status (thông qua task rotate_tasks trong gemini_webapi.utils)
+                from gemini_webapi.utils import rotate_tasks
+                psid = account.cookie_1PSID
+                if psid in rotate_tasks:
+                    task = rotate_tasks[psid]
+                    if task.done() and task.exception():
+                        # Nếu task refresh bị lỗi (thường là AuthError), đánh dấu die
+                        if not account.is_dead:
+                            print(f"[Sync] Tài khoản {account.name} đã bị DIE (Lỗi refresh)!")
+                            account.is_dead = True
+                            account.status_message = f"Lỗi xác thực (Die): {task.exception()}"
+                            changed = True
+                    elif not task.done():
+                        account.is_dead = False
+                        account.status_message = "Đang chạy (Live)"
+                
+                # 3. Nếu account active nhưng chưa có client (ví dụ bị đóng do idle)
+                # chúng ta không cần force khởi tạo ở đây vì get_client sẽ lo
+            else:
+                if account.is_active and not account.is_dead:
+                    account.status_message = "Chờ khởi tạo"
+
+        if changed:
+            self.save_accounts()
+            print("[Sync] Đã tự động lưu các thay đổi vào accounts.json")
+            
+    async def run_auto_heartbeat(self):
+        """Gửi tin nhắn 'hi' định kỳ để giữ cho session luôn 'nóng' (tự động 100%)."""
+        print("[API] Đang chạy Auto Heartbeat cho tất cả tài khoản...")
+        for account in self.accounts:
+            if account.is_active and not account.is_dead:
+                try:
+                    if account.client is None or not account.client._running:
+                        await self.initialize_account(account)
+                    
+                    if account.client and account.client._running:
+                        print(f"[API] [{account.name}] Gửi Heartbeat ping...")
+                        # Gửi prompt ngắn nhất có thể
+                        await account.client.generate_content("hi", timeout=60)
+                        print(f"[API] [{account.name}] Heartbeat thành công ✅")
+                except Exception as e:
+                    print(f"[API] [{account.name}] Heartbeat thất bại: {e}")
+            
+    async def run_browser_auto_login(self, email: str = None):
+        """Chạy script automation trình duyệt để lấy cookie mới."""
+        print(f"[Browser] Đang tự động đăng nhập để lấy cookie cho {email or 'tất cả'}...")
+        try:
+            # Sử dụng sys.executable để lấy đúng đường dẫn python đang chạy
+            import sys
+            import subprocess
+            cmd = [sys.executable, "browser_auto_login.py"]
+            if email:
+                cmd.extend(["--email", email])
+            
+            # Chạy script và đợi tối đa 120 giây
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout, stderr = process.communicate(timeout=120)
+            
+            if process.returncode == 0:
+                print(f"[Browser] Lấy cookie thành công cho {email or 'tất cả'}!")
+                # Load lại accounts từ file (vì script đã cập nhật accounts.json)
+                self._load_accounts()
+                return True
+            else:
+                print(f"[Browser] Lấy cookie thất bại: {stderr}")
+                return False
+        except Exception as e:
+            print(f"[Browser] Lỗi khi chạy script automation: {e}")
+            return False
+            
+    async def force_rotate_account(self, account_id: int) -> tuple[bool, str]:
+        """Bắt buộc làm mới cookie cho một tài khoản cụ thể."""
+        if account_id < 0 or account_id >= len(self.accounts):
+            return False, "Không tìm thấy tài khoản"
+            
+        account = self.accounts[account_id]
+        from gemini_webapi.utils.rotate_1psidts import rotate_1psidts
+        
+        cookies = {
+            "__Secure-1PSID": account.cookie_1PSID,
+            "__Secure-1PSIDTS": account.cookie_1PSIDTS or ""
+        }
+        
+        try:
+            new_psidts = await rotate_1psidts(cookies)
+            if new_psidts:
+                account.cookie_1PSIDTS = new_psidts
+                account.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+                account.is_dead = False
+                account.status_message = "Đã làm mới (Manual Rotate)"
+                
+                # Cập nhật client đang chạy nếu có
+                if account.client and account.client._running:
+                    account.client.cookies["__Secure-1PSIDTS"] = new_psidts
+                    account.client.client.cookies.set("__Secure-1PSIDTS", new_psidts)
+                
+                self.save_accounts()
+                return True, "Làm mới thành công!"
+            else:
+                # Nếu không có cookie mới, thử chạy Browser Auto-Login để cứu
+                print(f"[API] [{account.name}] No new cookie, attempting Browser Auto-Login...")
+                browser_success = await self.run_browser_auto_login(account.name)
+                if browser_success:
+                    # Load lại account đã được cập nhật
+                    for acc in self.accounts:
+                        if acc.name == account.name:
+                            await self.initialize_account(acc)
+                            if not acc.is_dead:
+                                return True, "Đã khôi phục thành công bằng Browser Automation!"
+                
+                return False, "Google không trả về cookie mới và tự động đăng nhập thất bại"
+        except Exception as e:
+            error_msg = str(e)
+            if "401" in error_msg:
+                error_msg = "Cookie 1PSID đã chết, không thể làm mới TS"
+            return False, f"Lỗi làm mới: {error_msg}"
     
     async def reload(self):
         """Reload accounts from file and close old clients."""
@@ -254,6 +482,9 @@ class AccountManager:
         # Reload accounts
         self._load_accounts()
         self.current_index = 0
+        
+        # Khởi tạo lại tất cả tài khoản ngay lập tức
+        asyncio.create_task(self.initialize_all())
         
         print(f"[API] Reloaded {len(self.accounts)} account(s)")
     
@@ -289,6 +520,8 @@ class AccountManager:
                 "cookie_1PSID": acc.cookie_1PSID,
                 "cookie_1PSIDTS": acc.cookie_1PSIDTS,
                 "is_active": acc.is_active,
+                "is_dead": acc.is_dead,
+                "status_message": acc.status_message,
                 "active": acc.client is not None and acc.client._running if acc.client else False,
                 "created_at": acc.created_at,
                 "updated_at": acc.updated_at
@@ -353,6 +586,38 @@ class ErrorResponse(BaseModel):
     error: dict
 
 
+# ============ Chat API Models ============
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatCompletionRequest(BaseModel):
+    model: str = Field(default="gemini-2.5-flash")
+    messages: List[ChatMessage]
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 0.9
+    n: Optional[int] = 1
+    stream: Optional[bool] = False
+    max_tokens: Optional[int] = None
+
+
+class ChatCompletionChoice(BaseModel):
+    index: int
+    message: ChatMessage
+    finish_reason: str = "stop"
+
+
+class ChatCompletionResponse(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    choices: List[ChatCompletionChoice]
+    usage: Dict[str, int] = Field(default_factory=lambda: {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+
+
 # ============ Gemini Client Management ============
 
 async def get_gemini_client() -> tuple[GeminiClient, Account]:
@@ -368,31 +633,45 @@ async def get_gemini_client() -> tuple[GeminiClient, Account]:
     return await account_manager.get_client()
 
 
-def verify_auth(authorization: Optional[str]) -> bool:
-    """Verify Bearer token authorization (cho API endpoints)."""
-    if not authorization:
+def verify_auth(
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None, alias="x-api-key")
+) -> bool:
+    """Verify authorization. Supports Authorization (Bearer) and x-api-key headers."""
+    # 1. Get token from any available header
+    token = None
+    if authorization:
+        parts = authorization.split(" ")
+        token = parts[1] if len(parts) == 2 else parts[0]
+    elif x_api_key:
+        token = x_api_key
+        
+    if not token:
         return False
 
-    parts = authorization.split(" ")
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        return False
-
-    token = parts[1]
+    # 2. Check if it's a valid admin session
+    if verify_admin_session(token):
+        return True
+        
+    # 3. Check if it matches the API key
     expected_token = CONFIG.get("api_key", "sk-demo")
-
     return token == expected_token
 
 
-def verify_admin_auth(authorization: Optional[str]) -> bool:
-    """Verify admin authorization (cho admin endpoints). Hỗ trợ cả Bearer token và admin session token."""
-    if not authorization:
+def verify_admin_auth(
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None, alias="x-api-key")
+) -> bool:
+    """Verify admin authorization. Hỗ trợ cả Authorization và x-api-key."""
+    token = None
+    if authorization:
+        parts = authorization.split(" ")
+        token = parts[1] if len(parts) == 2 else parts[0]
+    elif x_api_key:
+        token = x_api_key
+        
+    if not token:
         return False
-
-    parts = authorization.split(" ")
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        return False
-
-    token = parts[1]
     
     # Kiểm tra admin session token trước
     if verify_admin_session(token):
@@ -453,14 +732,49 @@ def get_size_prompt(size: Optional[str]) -> str:
 
 # ============ Lifespan ============
 
+async def background_sync_task():
+    """Chạy ngầm để đồng bộ cookie và kiểm tra sức khỏe tài khoản mỗi 30 giây."""
+    print("[API] Background sync task started")
+    heartbeat_counter = 0
+    # Chạy lần đầu sau 10 phút khởi động, sau đó cứ mỗi 1 tiếng (Dành cho VPS)
+    heartbeat_interval = 3600 
+    
+    while True:
+        try:
+            await asyncio.sleep(30)
+            heartbeat_counter += 30
+            
+            if account_manager:
+                # 1. Đồng bộ cookie PSIDTS (Xoay vòng tự động)
+                await account_manager.sync_with_clients()
+                
+                # 2. Heartbeat định kỳ (Giữ session sống)
+                if heartbeat_counter >= heartbeat_interval:
+                    await account_manager.run_auto_heartbeat()
+                    heartbeat_counter = 0
+                    
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[Sync Error] {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     global account_manager
     print(f"[API] Starting Gemini Image API Server on {CONFIG.get('host', '0.0.0.0')}:{CONFIG.get('port', 8000)}")
     account_manager = AccountManager(ACCOUNTS_PATH, timeout=CONFIG.get("timeout", 120))
+    
+    # Khởi tạo toàn bộ account ngay khi bật server
+    asyncio.create_task(account_manager.initialize_all())
+    
+    # Khởi tạo background task
+    sync_task = asyncio.create_task(background_sync_task())
+    
     yield
     # Shutdown
+    sync_task.cancel()
     if account_manager:
         await account_manager.close_all()
         print("[API] All Gemini clients closed")
@@ -597,7 +911,7 @@ async def generate_image(
         if request.seed:
             full_prompt += f" (seed: {request.seed})"
 
-        print(f"[API] [{account.name}] Generating image with prompt: {full_prompt[:100]}...")
+        print(f"🚀 [Gen] [{account.name}] Prompt: {full_prompt[:80]}...")
 
         # Call Gemini API
         response = await client.generate_content(
@@ -636,7 +950,7 @@ async def generate_image(
         if not image_data_list:
             raise HTTPException(status_code=500, detail="Failed to download generated images")
 
-        print(f"[API] [{account.name}] Successfully generated {len(image_data_list)} image(s)")
+        print(f"✅ [Gen] [{account.name}] Done: {len(image_data_list)} image(s)")
 
         return ImageResponse(
             created=int(time.time()),
@@ -689,16 +1003,15 @@ async def edit_image(
 
         # Call Gemini API with image
         start_time = time.time()
-        print(f"[API] [{account.name}] Start calling Gemini API...")
         response = await client.generate_content(
             prompt=full_prompt,
             files=[temp_path],
             model=model,
             image_mode=True,
             timeout=CONFIG.get("timeout", 120),
-            debug_mode=True
+            debug_mode=False
         )
-        print(f"[API] [{account.name}] Gemini API responded in {time.time() - start_time:.2f}s")
+        print(f"⚡ [Edit] [{account.name}] API Responded: {time.time() - start_time:.2f}s")
 
         if not response.images:
             raise HTTPException(
@@ -716,10 +1029,9 @@ async def edit_image(
 
         for idx, img in enumerate(images_to_process):
             try:
-                print(f"[API] [{account.name}] Downloading result image {idx+1}/{len(images_to_process)}...")
                 dl_start = time.time()
                 b64_string, url = await download_image_as_base64(img, client.cookies)
-                print(f"[API] [{account.name}] Image {idx+1} downloaded in {time.time() - dl_start:.2f}s")
+                print(f"📥 [DL] [{account.name}] Image {idx+1}/{len(images_to_process)}: {time.time() - dl_start:.2f}s")
                 image_data_list.append(ImageData(
                     b64_json=b64_string if response_format == "b64_json" else None,
                     url=url if response_format == "url" else None,
@@ -754,6 +1066,64 @@ async def edit_image(
         # Clean up temp file
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+async def chat_completions(
+    request: ChatCompletionRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    OpenAI-compatible chat completions endpoint.
+    """
+    if not verify_auth(authorization):
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+
+    try:
+        client, account = await get_gemini_client()
+        
+        # Convert messages to a single prompt or handle history
+        # For simple mapping, we use the last message as prompt
+        # TODO: Implement full history support if GeminiClient supports it easily
+        if not request.messages:
+            raise HTTPException(status_code=400, detail="Messages list cannot be empty")
+            
+        full_prompt = ""
+        for msg in request.messages:
+            full_prompt += f"{msg.role}: {msg.content}\n"
+        
+        # Add a final instruction for Gemini to respond as assistant
+        full_prompt += "assistant: "
+
+        print(f"[API] [{account.name}] Chat request with {len(request.messages)} messages")
+
+        response = await client.generate_content(
+            prompt=full_prompt,
+            model=request.model,
+            timeout=CONFIG.get("timeout", 120),
+            debug_mode=True
+        )
+
+        choices = [
+            ChatCompletionChoice(
+                index=0,
+                message=ChatMessage(role="assistant", content=response.text or ""),
+                finish_reason="stop"
+            )
+        ]
+
+        return ChatCompletionResponse(
+            id=f"chatcmpl-{secrets.token_hex(12)}",
+            created=int(time.time()),
+            model=request.model,
+            choices=choices
+        )
+
+    except Exception as e:
+        print(f"[API] Chat Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")
@@ -988,6 +1358,108 @@ async def reload_accounts(authorization: Optional[str] = Header(None)):
         "message": "Accounts reloaded successfully",
         "total_accounts": len(account_manager.accounts)
     }
+
+
+@app.post("/admin/accounts/{account_id}/refresh")
+async def force_refresh_account(
+    account_id: int,
+    authorization: Optional[str] = Header(None)
+):
+    """Bắt buộc làm mới cookie cho một tài khoản cụ thể (requires auth)."""
+    if not verify_admin_auth(authorization):
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+    
+    global account_manager
+    if account_manager is None:
+        raise HTTPException(status_code=500, detail="AccountManager not initialized")
+    
+    success, message = await account_manager.force_rotate_account(account_id)
+    if success:
+        return {"success": True, "message": message}
+    else:
+        raise HTTPException(status_code=400, detail=message)
+
+
+class AccountTestRequest(BaseModel):
+    cookie_1PSID: str = Field(..., description="Cookie 1PSID to test")
+    cookie_1PSIDTS: Optional[str] = Field(None, description="Cookie 1PSIDTS to test")
+
+
+@app.post("/admin/accounts/test")
+async def test_account_cookies(
+    request: AccountTestRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Test if cookies are valid without saving (requires auth)."""
+    if not verify_admin_auth(authorization):
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+    
+    print(f"[API] Testing cookies for manual request...")
+    
+    try:
+        # Initialize a temporary client
+        test_client = GeminiClient(
+            secure_1psid=request.cookie_1PSID,
+            secure_1psidts=request.cookie_1PSIDTS if request.cookie_1PSIDTS else None
+        )
+        
+        # Try to initialize (this checks if cookies are valid)
+        await test_client.init(timeout=30, auto_close=True, verbose=False)
+        
+        is_active = test_client._running
+        await test_client.close()
+        
+        if is_active:
+            return {"success": True, "message": "Cookies are valid! ✅"}
+        else:
+            return {"success": False, "message": "Cookies are invalid or expired. ❌"}
+            
+    except Exception as e:
+        error_msg = str(e)
+        if "401" in error_msg or "Unauthorized" in error_msg:
+            return {"success": False, "message": "Cookies expired (401 Unauthorized). ❌"}
+        return {"success": False, "message": f"Error: {error_msg}"}
+
+
+@app.post("/admin/accounts/rotate_test")
+async def manual_rotate_test(
+    request: AccountTestRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Test cookie rotation manually (requires auth)."""
+    if not verify_admin_auth(authorization):
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+    
+    from gemini_webapi.utils.rotate_1psidts import rotate_1psidts
+    
+    print(f"[API] Manual rotation test requested...")
+    
+    if not request.cookie_1PSID:
+        return {"success": False, "message": "Missing __Secure-1PSID cookie."}
+
+    cookies = {
+        "__Secure-1PSID": request.cookie_1PSID,
+        "__Secure-1PSIDTS": request.cookie_1PSIDTS or ""
+    }
+    
+    try:
+        new_1psidts = await rotate_1psidts(cookies)
+        if new_1psidts:
+            return {
+                "success": True, 
+                "message": "Rotate successful! ✅",
+                "new_1psidts": new_1psidts
+            }
+        else:
+            return {
+                "success": False, 
+                "message": "Rotate failed: No new cookie returned (Internal check failed). ❌"
+            }
+    except Exception as e:
+        error_msg = str(e)
+        if "401" in error_msg or "Unauthorized" in error_msg:
+            return {"success": False, "message": "Rotate failed: Unauthorized/Expired (401). ❌"}
+        return {"success": False, "message": f"Rotate Error: {error_msg}"}
 
 
 # ============ Main ============
