@@ -76,17 +76,17 @@ CONFIG = load_config()
 print(CONFIG)
 
 # Paths
-# Use /app/data/accounts.json in container (when /app/data is mounted), 
-# otherwise use accounts.json in same directory as api_server.py
-_app_data = Path("/app/data")
-_local_data = Path(__file__).parent / "data"
+# Auto-detect data directory (priority: /app/data for Docker)
+SCRIPT_DIR = Path(__file__).parent
+DATA_DIR = SCRIPT_DIR
+if Path("/app/data").exists():
+    DATA_DIR = Path("/app/data")
+elif (SCRIPT_DIR / "data").exists():
+    DATA_DIR = SCRIPT_DIR / "data"
 
-if _app_data.exists() and _app_data.is_dir():
-    ACCOUNTS_PATH = _app_data / "accounts.json"
-elif _local_data.exists() and _local_data.is_dir():
-    ACCOUNTS_PATH = _local_data / "accounts.json"
-else:
-    ACCOUNTS_PATH = Path(__file__).parent / "accounts.json"
+ACCOUNTS_PATH = DATA_DIR / "accounts.json"
+CREDENTIALS_PATH = DATA_DIR / "credentials.json"
+BROWSER_DATA_PATH = DATA_DIR / "browser_data"
 
 # ============ Admin Authentication ============
 
@@ -158,6 +158,7 @@ class Account:
     client: Optional[GeminiClient] = None
     is_active: bool = True
     is_dead: bool = False
+    is_initializing: bool = False # Cờ đánh dấu đang trong quá trình khởi tạo
     status_message: str = "Chưa kiểm tra"
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -175,6 +176,7 @@ class AccountManager:
         self.timeout = timeout
         self.accounts: List[Account] = []
         self.current_index = 0
+        self.browser_semaphore = asyncio.Semaphore(3)  # Tăng lên 3 trình duyệt chạy song song
         self._load_accounts()
         print(f"🔋 Manager: {len(self.accounts)} account(s)")
     
@@ -264,6 +266,8 @@ class AccountManager:
 
     async def initialize_account(self, account: Account):
         """Khởi tạo một tài khoản cụ thể với cơ chế tự phục hồi cookie TS."""
+        account.is_initializing = True
+        account.status_message = "Đang kiểm tra..."
         if account.client is None or not account.client._running:
             try:
                 # Thử lần 1: Dùng cả 2 cookie hiện có
@@ -311,25 +315,34 @@ class AccountManager:
                     print(f"🔄 [{account.name}] Standard rotate failed, attempting Browser Automation recovery...")
                     browser_success = await self.run_browser_auto_login(account.name)
                     if browser_success:
-                        # Sau khi browser login thành công, thử khởi tạo lại 1 lần cuối
-                        # Ta reload lại dnah sách account nội bộ
-                        for acc_data in self.accounts:
-                            if acc_data.name == account.name:
-                                try:
-                                    account.cookie_1PSID = acc_data.cookie_1PSID
-                                    account.cookie_1PSIDTS = acc_data.cookie_1PSIDTS
-                                    account.client = GeminiClient(secure_1psid=account.cookie_1PSID, secure_1psidts=account.cookie_1PSIDTS)
-                                    await account.client.init(timeout=self.timeout, auto_close=False, auto_refresh=True)
-                                    account.is_dead = False
-                                    account.status_message = "Đã phục hồi qua Browser Automation"
-                                    print(f"✅ [{account.name}] Browser recovery successful")
-                                    return
-                                except Exception as e3:
-                                    print(f"❌ [{account.name}] Final init failed after browser login: {e3}")
+                        # Đợi một chút để file kịp ghi xong và đồng bộ
+                        await asyncio.sleep(2)
+                        # Load lại dữ liệu mới nhất từ file accounts.json
+                        try:
+                            with open(self.accounts_path, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                                for acc_data in data.get("accounts", []):
+                                    if acc_data.get("name") == account.name:
+                                        account.cookie_1PSID = acc_data.get("cookie_1PSID", account.cookie_1PSID)
+                                        account.cookie_1PSIDTS = acc_data.get("cookie_1PSIDTS", account.cookie_1PSIDTS)
+                                        account.updated_at = acc_data.get("updated_at", account.updated_at)
+                                        break
+                            
+                            # Thử khởi tạo lại với cookie mới vừa nạp
+                            account.client = GeminiClient(secure_1psid=account.cookie_1PSID, secure_1psidts=account.cookie_1PSIDTS)
+                            await account.client.init(timeout=self.timeout, auto_close=False, auto_refresh=True)
+                            account.is_dead = False
+                            account.status_message = "Đang hoạt động (Vừa phục hồi)"
+                            print(f"✅ [{account.name}] Browser recovery successful and client initialized!")
+                            return
+                        except Exception as e3:
+                            print(f"❌ [{account.name}] Final init failed after browser login: {e3}")
                     
                     account.is_dead = True
                     account.status_message = f"Khởi tạo lỗi (Hết hạn): {str(e2)}"
                     print(f"❌ [{account.name}] Auto-recovery failed: {e2}")
+                finally:
+                    account.is_initializing = False
 
     async def initialize_all(self):
         """Khởi tạo song song tất cả các tài khoản đang active."""
@@ -374,7 +387,7 @@ class AccountManager:
                 # 3. Nếu account active nhưng chưa có client (ví dụ bị đóng do idle)
                 # chúng ta không cần force khởi tạo ở đây vì get_client sẽ lo
             else:
-                if account.is_active and not account.is_dead:
+                if account.is_active and not account.is_dead and not account.is_initializing:
                     account.status_message = "Chờ khởi tạo"
 
         if changed:
@@ -399,31 +412,51 @@ class AccountManager:
                     print(f"[API] [{account.name}] Heartbeat thất bại: {e}")
             
     async def run_browser_auto_login(self, email: str = None):
-        """Chạy script automation trình duyệt để lấy cookie mới."""
-        print(f"[Browser] Đang tự động đăng nhập để lấy cookie cho {email or 'tất cả'}...")
-        try:
-            # Sử dụng sys.executable để lấy đúng đường dẫn python đang chạy
-            import sys
-            import subprocess
-            cmd = [sys.executable, "browser_auto_login.py"]
-            if email:
-                cmd.extend(["--email", email])
+        """Chạy script automation trình duyệt để lấy cookie mới dùng Semaphore để giới hạn luồng."""
+        # Cập nhật trạng thái chờ hàng đợi nếu semaphore đang bận
+        # (Status này sẽ hiện trên UI thay vì chữ "Chờ khởi tạo")
+        current_account = next((a for a in self.accounts if a.name == email), None)
+        if current_account and self.browser_semaphore.locked():
+            current_account.status_message = "Đang chờ hàng đợi login..."
             
-            # Chạy script và đợi tối đa 120 giây
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            stdout, stderr = process.communicate(timeout=120)
-            
-            if process.returncode == 0:
-                print(f"[Browser] Lấy cookie thành công cho {email or 'tất cả'}!")
-                # Load lại accounts từ file (vì script đã cập nhật accounts.json)
-                self._load_accounts()
-                return True
-            else:
-                print(f"[Browser] Lấy cookie thất bại: {stderr}")
+        async with self.browser_semaphore:
+            if current_account:
+                current_account.status_message = "Đang tự động đăng nhập..."
+            print(f"[Browser] Đang tự động đăng nhập để lấy cookie cho {email or 'tất cả'}...")
+            try:
+                # Sử dụng sys.executable để lấy đúng đường dẫn python đang chạy
+                import sys
+                cmd = [sys.executable, "browser_auto_login.py", "--headless"]
+                if email:
+                    cmd.extend(["--email", email])
+                
+                # Chạy script dùng asyncio subprocess để không làm nghẽn event loop
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+                except asyncio.TimeoutError:
+                    try:
+                        process.kill()
+                    except:
+                        pass
+                    print(f"[Browser] Lấy cookie cho {email or 'tất cả'} bị timeout!")
+                    return False
+
+                if process.returncode == 0:
+                    print(f"[Browser] Lấy cookie thành công cho {email or 'tất cả'}!")
+                    return True
+                else:
+                    error_msg = stderr.decode() if stderr else "Unknown error"
+                    print(f"[Browser] Lấy cookie thất bại cho {email}: {error_msg}")
+                    return False
+            except Exception as e:
+                print(f"[Browser] Lỗi khi chạy script automation cho {email}: {e}")
                 return False
-        except Exception as e:
-            print(f"[Browser] Lỗi khi chạy script automation: {e}")
-            return False
             
     async def force_rotate_account(self, account_id: int) -> tuple[bool, str]:
         """Bắt buộc làm mới cookie cho một tài khoản cụ thể."""
@@ -523,6 +556,7 @@ class AccountManager:
                 "is_dead": acc.is_dead,
                 "status_message": acc.status_message,
                 "active": acc.client is not None and acc.client._running if acc.client else False,
+                "is_initializing": acc.is_initializing,
                 "created_at": acc.created_at,
                 "updated_at": acc.updated_at
             }

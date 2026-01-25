@@ -1,25 +1,19 @@
 services:
   gemini-api:
-    image: registry.gitlab.com/tuanxx31/gemini-api:latest
+    build: .
     container_name: gemini-api
     restart: unless-stopped
     ports:
-      - "8989"
+      - "8989:8989"
+    volumes:
+      - ./data:/app/data
     env_file:
       - .env
-    networks:
-      shared-network:
-        aliases:
-          - gemini-api
     environment:
       - PYTHONUNBUFFERED=1
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8989/health').read()"]
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8989/health').read()" ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-
-networks:
-  shared-network:
-    external: true

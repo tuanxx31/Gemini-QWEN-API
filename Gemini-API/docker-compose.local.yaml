@@ -1,6 +1,0 @@
-services:
-  gemini-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: registry.gitlab.com/tuanxx31/gemini-api:latest

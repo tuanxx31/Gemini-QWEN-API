@@ -197,6 +197,38 @@ def update_accounts_json(email: str, cookies: dict):
     
     print(f"[SAVE] Da luu cookie vao {ACCOUNTS_PATH}")
 
+async def manual_login_flow(email: str, password: str, totp_secret: str = None):
+    """Mở trình duyệt để người dùng tự tay đăng nhập trên Windows."""
+    user_data_dir = BROWSER_DATA_PATH / email.replace("@", "_at_").replace(".", "_")
+    BROWSER_DATA_PATH.mkdir(exist_ok=True)
+    
+    async with async_playwright() as p:
+        browser = await p.chromium.launch_persistent_context(
+            user_data_dir=str(user_data_dir),
+            headless=False, # Luôn hiện UI
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        page = await browser.new_page()
+        
+        print(f"\n[MANUAL] Vui long dang nhap tai khoan {email} trong cua so trinh duyet...")
+        print("[INFO] Script se tu dong luu session khi ban vao den trang chu Gemini.")
+        
+        await page.goto(GEMINI_URL)
+        
+        # Vong lap cho doi: check moi 2 giay xem da co cookie 1PSID chua
+        try:
+            for _ in range(300): # Cho tối đa 10 phút (600 giay)
+                cookies = await get_gemini_cookies(page)
+                if cookies.get("1PSID"):
+                    print(f"[OK] Da phat hien chung thuc thanh cong cho {email}!")
+                    update_accounts_json(email, cookies)
+                    return True
+                await asyncio.sleep(2)
+            print("[FAIL] Timeout: Ban chua dang nhap kip trong 10 phut.")
+            return False
+        finally:
+            await browser.close()
+
 
 async def auto_login(email: str, password: str, totp_secret: str = None, headless: bool = False, fresh: bool = False):
     """Main function to auto-login and get cookies"""
@@ -216,44 +248,75 @@ async def auto_login(email: str, password: str, totp_secret: str = None, headles
         browser = await p.chromium.launch_persistent_context(
             user_data_dir=str(user_data_dir),
             headless=headless,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            viewport={'width': 1280, 'height': 720},
+            ignore_default_args=["--enable-automation"],
             args=[
                 "--disable-blink-features=AutomationControlled",
-                "--no-sandbox"
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-infobars"
             ]
         )
         
         page = await browser.new_page()
         
+        # Thêm script để ẩn Playwright cấp cao hơn
+        await page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'languages', {get: () => ['vi-VN', 'vi', 'en-US', 'en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        """)
+        
         try:
-            # Check if already logged in
+            print(f"[STAGE] Kiem tra trang thai Gemini cho {email}...")
             try:
                 await page.goto(GEMINI_URL, timeout=60000)
-            except:
-                print("[WARN] Trang Gemini load cham, dang thu lai...")
                 await asyncio.sleep(5)
-            await asyncio.sleep(3)
+            except Exception as e:
+                print(f"[WARN] Khong vao duoc Gemini ({e}), thu vao Google Login truc tiep...")
+                await page.goto(GOOGLE_LOGIN_URL)
+                await asyncio.sleep(5)
             
-            # Try to get cookies first
+            # Kiem tra xem co nut "Sign in" (Chua dang nhap) hay khong
+            is_logged_in = True
+            signin_button = await page.query_selector("a[href*='accounts.google.com/ServiceLogin'], button:has-text('Sign in'), button:has-text('Đăng nhập')")
+            if signin_button:
+                is_logged_in = False
+                print(f"[INFO] {email} - Chua dang nhap, tien hanh login moi...")
+            
+            if is_logged_in:
+                # Thu lay cookie xem co song khong
+                cookies = await get_gemini_cookies(page)
+                if cookies.get("1PSIDTS"): # Co PSIDTS la cookie moi
+                    print(f"[OK] {email} - Session van con ngon!")
+                    update_accounts_json(email, cookies)
+                    return cookies
+                else:
+                    print(f"[INFO] {email} - Cookie cũ hoặc thiếu PSIDTS, cần login lại...")
+            
+            # Tien hanh dang nhap
+            login_success = await login_google(page, email, password, totp_secret)
+            if not login_success:
+                print(f"[FAIL] {email} - Quy trình đăng nhập thất bại.")
+                return None
+
+            # Quay lại Gemini để đồng bộ cookie mới
+            print(f"[STAGE] Quay lai Gemini de lay cookie moi...")
+            await page.goto(GEMINI_URL, timeout=60000)
+            await asyncio.sleep(10)
+            
             cookies = await get_gemini_cookies(page)
-            
-            # If we got valid cookies, we're done
             if cookies.get("1PSID"):
-                print("[OK] Da co session hop le!")
-                update_accounts_json(email, cookies)
-                return cookies
-            
-            # No valid cookies, need to login
-            print("[RETRY] Session khong hop le, dang nhap lai...")
-            await login_google(page, email, password, totp_secret)
-            
-            # Get cookies after login
-            cookies = await get_gemini_cookies(page)
-            
-            if cookies.get("1PSID"):
+                print(f"[SUCCESS] {email} - Da lay duoc cookie moi thanh cong!")
                 update_accounts_json(email, cookies)
                 return cookies
             else:
-                print("[FAIL] Khong lay duoc cookie!")
+                print(f"[FAIL] {email} - Van khong thay cookie sau khi login. Co the Google yeu cau xac minh them.")
+                # Luu anh man hinh de debug (neu can trong tuong lai)
+                # await page.screenshot(path=str(DATA_DIR / f"error_{email}.png"))
                 return None
                 
         finally:
@@ -263,9 +326,15 @@ async def auto_login(email: str, password: str, totp_secret: str = None, headles
 async def main():
     parser = argparse.ArgumentParser(description="Auto-login Google and get Gemini cookies")
     parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
+    parser.add_argument("--manual", action="store_true", help="Manual login mode (UI will open, wait for user)")
     parser.add_argument("--fresh", action="store_true", help="Delete old profile and create new one (for testing)")
     parser.add_argument("--email", type=str, help="Specific email to login")
     args = parser.parse_args()
+    
+    # Nếu là manual mode thì không được dùng headless
+    if args.manual:
+        args.headless = False
+        print("[INFO] Che do MANUAL: Trinh duyet se mo len de ban tu dang nhap.")
     
     credentials = load_credentials()
     if not credentials:
@@ -278,16 +347,16 @@ async def main():
         
         if args.email and email != args.email:
             continue
-        
-        if not password or password == "NHAP_MAT_KHAU_VAO_DAY":
-            print(f"[WARN] Ban chua nhap mat khau cho {email} trong credentials.json")
-            continue
-        
+            
         print(f"\n{'='*50}")
         print(f"[START] Xu ly tai khoan: {email}")
         print(f"{'='*50}")
         
-        result = await auto_login(email, password, totp_secret, headless=True, fresh=args.fresh)
+        # Neu o che do manual, ta se goi ham login theo cach dac biet
+        if args.manual:
+            result = await manual_login_flow(email, password, totp_secret)
+        else:
+            result = await auto_login(email, password, totp_secret, headless=args.headless, fresh=args.fresh)
         
         if result:
             print(f"[OK] Hoan tat cho {email}!")

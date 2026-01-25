@@ -206,6 +206,12 @@
             color: white;
         }
 
+        .status-processing {
+            background: #3498db;
+            color: white;
+            animation: pulse 1.5s infinite;
+        }
+
         @keyframes pulse {
             0% {
                 opacity: 1;
@@ -656,8 +662,8 @@
                     <div class="account-header">
                         <div class="account-name">${escapeHtml(acc.name)}</div>
                         <div style="display: flex; gap: 5px;">
-                            <span class="account-status ${acc.is_dead ? 'status-dead' : (acc.active ? 'status-active' : 'status-waiting')}">
-                                ${acc.is_dead ? '☠ Die' : (acc.active ? '🟢 Sống' : '⏳ Chờ')}
+                            <span class="account-status ${acc.is_dead ? 'status-dead' : (acc.is_initializing ? 'status-processing' : (acc.active ? 'status-active' : 'status-waiting'))}">
+                                ${acc.is_dead ? '☠ Die' : (acc.is_initializing ? '⚙️ Đang chạy' : (acc.active ? '🟢 Sống' : '⏳ Chờ'))}
                             </span>
                             <span class="expiry-status ${expiryStatus.status}" title="${expiryStatus.message}">
                                 ${expiryStatus.message}
